@@ -8,16 +8,22 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Inicializar Firebase Admin (Railway usará credenciales desde el entorno si están configuradas)
-const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
-} catch (e) {
-  console.log("Firebase Admin ya inicializado o sin credenciales disponibles.");
+// 🔹 Cargar credenciales desde variable de entorno en Railway
+let serviceAccount = null;
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  try {
+    serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log("✅ Firebase Admin inicializado con credenciales de Railway");
+  } catch (error) {
+    console.error("❌ Error al parsear credenciales de Firebase:", error);
+  }
+} else {
+  console.warn("⚠️ No se encontraron credenciales en GOOGLE_APPLICATION_CREDENTIALS_JSON");
 }
+
 const db = admin.firestore();
 
 // Datos del admin por defecto
@@ -27,18 +33,22 @@ const ADMIN_PHONE = "+240555558213";
 
 // Crear admin si no existe
 (async () => {
-  const ref = db.collection("users").doc("admin");
-  const doc = await ref.get();
-  if (!doc.exists) {
-    const hash = bcrypt.hashSync(ADMIN_PASS, 10);
-    await ref.set({
-      name: "Administrador",
-      email: ADMIN_EMAIL,
-      password_hash: hash,
-      role: "admin",
-      phone: ADMIN_PHONE
-    });
-    console.log("✅ Admin creado:", ADMIN_EMAIL);
+  try {
+    const ref = db.collection("users").doc("admin");
+    const doc = await ref.get();
+    if (!doc.exists) {
+      const hash = bcrypt.hashSync(ADMIN_PASS, 10);
+      await ref.set({
+        name: "Administrador",
+        email: ADMIN_EMAIL,
+        password_hash: hash,
+        role: "admin",
+        phone: ADMIN_PHONE
+      });
+      console.log("✅ Admin creado:", ADMIN_EMAIL);
+    }
+  } catch (err) {
+    console.error("❌ Error creando admin:", err);
   }
 })();
 
@@ -52,3 +62,4 @@ app.get("/api", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
 });
+
