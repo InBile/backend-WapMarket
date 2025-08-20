@@ -9,10 +9,12 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // Inicializar Firebase Admin (Railway usará credenciales desde el entorno si están configuradas)
-try {
-  admin.initializeApp({
-    credential: admin.credential.applicationDefault()
-  });
+const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
 } catch (e) {
   console.log("Firebase Admin ya inicializado o sin credenciales disponibles.");
 }
