@@ -8,6 +8,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+console.log("DEBUG: GOOGLE_APPLICATION_CREDENTIALS_JSON length =", process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON?.length);
+
+
 // 🔹 Inicialización segura de Firebase
 let db = null;
 
