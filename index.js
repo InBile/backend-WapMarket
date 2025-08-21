@@ -56,12 +56,10 @@ async function initDb() {
   `);
 }
 
-initDb().catch(console.error);
-
 // Crear admin predeterminado si no existe
 async function createDefaultAdmin() {
   const email = "admin@wapmarket.com";
-  const password = "naciel25091999"; // cámbialo por algo más seguro
+  const password = "admin123"; // cámbialo por algo más seguro
   const passwordHash = await bcrypt.hash(password, 10);
 
   const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
@@ -75,9 +73,6 @@ async function createDefaultAdmin() {
     console.log("⚡ Admin ya existe, no se creó otro.");
   }
 }
-
-createDefaultAdmin().catch(console.error);
-
 
 // ================= MIDDLEWARE =================
 function authMiddleware(req, res, next) {
@@ -205,6 +200,14 @@ app.get("/api/orders/:userId", async (req, res) => {
 });
 
 // ================= START =================
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+initDb()
+  .then(() => createDefaultAdmin())
+  .then(() => {
+    app.listen(PORT, () => console.log(`✅ Servidor corriendo en puerto ${PORT}`));
+  })
+  .catch(err => {
+    console.error("❌ Error inicializando la BD:", err);
+    process.exit(1);
+  });
 
 
