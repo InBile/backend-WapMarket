@@ -26,34 +26,6 @@ if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
   console.warn("⚠️ No se encontraron credenciales en GOOGLE_APPLICATION_CREDENTIALS_JSON");
 }
 
-// 🔹 Crear administrador por defecto (si Firestore disponible)
-(async () => {
-  if (!db) {
-    console.warn("⚠️ Firestore no disponible, se omite creación de admin.");
-    return;
-  }
-  try {
-    const ref = db.collection("users").doc("admin");
-    const doc = await ref.get();
-    if (!doc.exists) {
-      const hash = bcrypt.hashSync("admin123", 10);
-      await ref.set({
-        name: "Administrador",
-        email: "admin@wapmarket.local",
-        password_hash: hash,
-        role: "admin",
-        phone: "+240555558213",
-        created_at: admin.firestore.FieldValue.serverTimestamp()
-      });
-      console.log("✅ Admin creado en Firestore.");
-    } else {
-      console.log("ℹ️ Admin ya existe en Firestore.");
-    }
-  } catch (err) {
-    console.error("❌ Error creando admin:", err);
-  }
-})();
-
 // 🔹 Ruta raíz
 app.get("/", (req, res) => {
   res.send(`
@@ -70,6 +42,36 @@ app.get("/", (req, res) => {
 // 🔹 Ruta de prueba
 app.get("/api", (req, res) => {
   res.json({ msg: "🚀 Backend WapMarket funcionando en Railway" });
+});
+
+// 🔹 Ruta para crear admin manualmente
+app.post("/api/setup-admin", async (req, res) => {
+  if (!db) {
+    return res.status(500).json({ error: "Firestore no disponible" });
+  }
+
+  try {
+    const ref = db.collection("users").doc("admin");
+    const doc = await ref.get();
+
+    if (!doc.exists) {
+      const hash = bcrypt.hashSync("admin123", 10);
+      await ref.set({
+        name: "Administrador",
+        email: "admin@wapmarket.local",
+        password_hash: hash,
+        role: "admin",
+        phone: "+240555558213",
+        created_at: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return res.json({ success: true, msg: "✅ Admin creado correctamente" });
+    } else {
+      return res.json({ success: false, msg: "ℹ️ Admin ya existe" });
+    }
+  } catch (err) {
+    console.error("❌ Error creando admin:", err);
+    res.status(500).json({ error: "Error en servidor" });
+  }
 });
 
 // 🔹 Ejemplo de pedidos
