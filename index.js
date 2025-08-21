@@ -58,6 +58,27 @@ async function initDb() {
 
 initDb().catch(console.error);
 
+// Crear admin predeterminado si no existe
+async function createDefaultAdmin() {
+  const email = "admin@wapmarket.com";
+  const password = "naciel25091999"; // cámbialo por algo más seguro
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+  if (result.rows.length === 0) {
+    await pool.query(
+      "INSERT INTO users (email, password_hash, is_admin) VALUES ($1, $2, $3)",
+      [email, passwordHash, true]
+    );
+    console.log(`✅ Admin creado: ${email} / ${password}`);
+  } else {
+    console.log("⚡ Admin ya existe, no se creó otro.");
+  }
+}
+
+createDefaultAdmin().catch(console.error);
+
+
 // ================= MIDDLEWARE =================
 function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"];
