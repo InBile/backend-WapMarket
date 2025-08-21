@@ -1,4 +1,4 @@
-// Backend Express + PostgreSQL extendido (compatible con tu versión)
+// Backend Express + PostgreSQL extendido (compat con tu frontend actual)
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -16,16 +16,14 @@ const PORT = process.env.PORT || 3000;
 // ================= POSTGRES =================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
-// Helpers
+// ================= HELPERS =================
 const mapProduct = (p) => ({
-  // originales
   id: p.id,
   name: p.name,
   price: Number(p.price),
-  // compat frontend
   title: p.name,
   price_xaf: Number(p.price),
   stock: p.stock ?? 0,
@@ -40,13 +38,14 @@ const mapUser = (u) => ({
   email: u.email,
   name: u.name || null,
   phone: u.phone || null,
-  role: u.role || (u.is_admin ? 'admin' : 'buyer'),
+  role: u.role || (u.is_admin ? "admin" : "buyer"),
   is_admin: !!u.is_admin,
-  created_at: u.created_at
+  created_at: u.created_at,
 });
 
-// Crear/alterar tablas si no existen
+// ================= DB INIT + PARCHEO SEGURO =================
 async function initDb() {
+  // Tablas base (no fallan si ya existen)
   await pool.query(`
     -- ========= USERS =========
     CREATE TABLE IF NOT EXISTS users (
@@ -65,7 +64,6 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS stores (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
-      seller_user_id INT REFERENCES users(id) ON DELETE CASCADE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -73,13 +71,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
-      price NUMERIC NOT NULL,
-      store_id INT REFERENCES stores(id) ON DELETE SET NULL,
-      seller_id INT REFERENCES users(id) ON DELETE SET NULL,
-      stock INT DEFAULT 0,
-      image_url TEXT,
-      active BOOLEAN DEFAULT TRUE,
-      category TEXT
+      price NUMERIC NOT NULL
     );
 
     -- ========= CART =========
@@ -110,35 +102,63 @@ async function initDb() {
       quantity INT NOT NULL,
       unit_price NUMERIC
     );
+  `);
 
-    -- ========= ÍNDICES ÚTILES =========
+  // Columnas que podrían faltar (parche idempotente)
+  await pool.query(`
+    -- stores
+    ALTER TABLE stores
+      ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
+
+    -- products
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS store_id INT REFERENCES stores(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS seller_id INT REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS image_url TEXT,
+      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS category TEXT;
+
+    -- índices
     CREATE INDEX IF NOT EXISTS idx_products_seller_id ON products(seller_id);
     CREATE INDEX IF NOT EXISTS idx_products_store_id ON products(store_id);
     CREATE INDEX IF NOT EXISTS idx_stores_seller_user_id ON stores(seller_user_id);
-
-}
-
-    CREATE TABLE IF NOT EXISTS users (...);
-    CREATE TABLE IF NOT EXISTS products (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      price NUMERIC NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS cart (...);
-    CREATE TABLE IF NOT EXISTS orders (...);
-    CREATE TABLE IF NOT EXISTS order_items (...);
   `);
 
-  // 👇 Parche seguro
+  // Migración suave: si alguna base antigua tiene stores.seller_id, copiar a seller_user_id
   await pool.query(`
-    ALTER TABLE products 
-    ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE SET NULL;
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'stores' AND column_name = 'seller_id'
+      ) THEN
+        UPDATE stores
+        SET seller_user_id = COALESCE(seller_user_id, seller_id)
+        WHERE seller_user_id IS NULL;
+      END IF;
+    END $$;
+  `);
+
+  // Migración suave: si productos antiguos usan seller_user_id, copia a seller_id
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'products' AND column_name = 'seller_user_id'
+      ) THEN
+        UPDATE products
+        SET seller_id = COALESCE(seller_id, seller_user_id)
+        WHERE seller_id IS NULL;
+      END IF;
+    END $$;
   `);
 }
-
 initDb().catch(console.error);
 
-// Crear admin predeterminado si no existe
+// ================= ADMIN POR DEFECTO =================
 async function createDefaultAdmin() {
   const email = "admin@wapmarket.com";
   const password = "naciel25091999"; // cámbialo luego
@@ -148,7 +168,7 @@ async function createDefaultAdmin() {
   if (result.rows.length === 0) {
     await pool.query(
       "INSERT INTO users (email, password_hash, is_admin, role, name) VALUES ($1, $2, $3, $4, $5)",
-      [email, passwordHash, true, 'admin', 'Administrador']
+      [email, passwordHash, true, "admin", "Administrador"]
     );
     console.log(`✅ Admin creado: ${email} / ${password}`);
   } else {
@@ -164,32 +184,32 @@ function authMiddleware(req, res, next) {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, isAdmin, role }
+    req.user = decoded; // { id, email, isAdmin, role, isSeller? }
     next();
-  } catch (err) {
+  } catch {
     res.status(401).json({ error: "Invalid token" });
   }
 }
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-    const role = req.user.role || (req.user.isAdmin ? 'admin' : 'buyer');
-    if (role === 'admin' || roles.includes(role)) return next();
+    const role = req.user.role || (req.user.isAdmin ? "admin" : "buyer");
+    if (role === "admin" || roles.includes(role)) return next();
     return res.status(403).json({ error: "Not authorized" });
   };
 }
 
-// ================= USUARIOS / AUTH =================
+// ================= AUTH =================
 async function handleRegister(req, res) {
   const { email, password, name, phone, role } = req.body;
   try {
     const passwordHash = await bcrypt.hash(password, 10);
     const r = await pool.query(
       "INSERT INTO users (email, password_hash, name, phone, role) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-      [email, passwordHash, name || null, phone || null, role || 'buyer']
+      [email, passwordHash, name || null, phone || null, role || "buyer"]
     );
     res.json({ message: "User registered", user: mapUser(r.rows[0]) });
-  } catch (err) {
+  } catch {
     res.status(400).json({ error: "Email already registered" });
   }
 }
@@ -202,24 +222,20 @@ async function handleLogin(req, res) {
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) return res.status(400).json({ error: "Invalid password" });
 
-  const role = user.role || (user.is_admin ? 'admin' : (user.is_seller ? 'seller' : 'buyer'));
-
-  const payload = { 
-    id: user.id, 
-    email: user.email, 
-    isAdmin: user.is_admin, 
-    role, 
-    isSeller: user.is_seller   // 👈 ahora el token lleva info de vendedor
+  const role = user.role || (user.is_admin ? "admin" : (user.is_seller ? "seller" : "buyer"));
+  const payload = {
+    id: user.id,
+    email: user.email,
+    isAdmin: user.is_admin,
+    role,
+    isSeller: user.is_seller,
   };
-
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
   res.json({ token, user: mapUser(user) });
 }
 
-// Rutas originales y alias para que el frontend encaje
 app.post("/api/register", handleRegister);
 app.post("/api/auth/signup", handleRegister);
-
 app.post("/api/login", handleLogin);
 app.post("/api/auth/login", handleLogin);
 
@@ -228,14 +244,57 @@ app.get("/api/profile", authMiddleware, async (req, res) => {
   res.json(mapUser(result.rows[0]));
 });
 
-// ================= STORES =================
+// ================= STORES (NEGOCIOS) =================
+// Tolerante a esquemas viejos para evitar 42703 en producción
 app.get("/api/stores", async (req, res) => {
-  const r = await pool.query(`
-    SELECT s.id, s.name, s.seller_user_id, s.created_at, u.name as seller_name, u.email as seller_email
-    FROM stores s LEFT JOIN users u ON u.id = s.seller_user_id
-    ORDER BY s.id DESC
-  `);
-  res.json({ stores: r.rows });
+  try {
+    const r = await pool.query(`
+      SELECT 
+        s.id, 
+        s.name, 
+        s.seller_user_id, 
+        s.active,
+        s.created_at, 
+        u.name as seller_name, 
+        u.email as seller_email,
+        COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
+      FROM stores s 
+      LEFT JOIN users u ON u.id = s.seller_user_id
+      ORDER BY s.id DESC
+    `);
+    return res.json({ stores: r.rows });
+  } catch (e) {
+    // Si la columna no existe aún (42703), caer al plan B con seller_id
+    if (e && e.code === "42703") {
+      const r2 = await pool.query(`
+        SELECT 
+          s.id, 
+          s.name, 
+          s.seller_id AS seller_user_id, 
+          s.active,
+          s.created_at, 
+          u.name as seller_name, 
+          u.email as seller_email,
+          COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
+        FROM stores s 
+        LEFT JOIN users u ON u.id = s.seller_id
+        ORDER BY s.id DESC
+      `);
+      return res.json({ stores: r2.rows });
+    }
+    console.error(e);
+    return res.status(500).json({ error: "Cannot load stores" });
+  }
+});
+
+// Aliases comunes por si el frontend usa otros paths
+app.get("/api/shops", async (req, res) => {
+  const { rows } = await pool.query(`SELECT id, name, seller_user_id, active, created_at FROM stores ORDER BY id DESC`);
+  res.json({ stores: rows });
+});
+app.get("/api/businesses", async (req, res) => {
+  const { rows } = await pool.query(`SELECT id, name, seller_user_id, active, created_at FROM stores ORDER BY id DESC`);
+  res.json({ stores: rows });
 });
 
 // ================= PRODUCTOS =================
@@ -258,18 +317,18 @@ app.get("/api/products/:id", async (req, res) => {
   res.json(mapProduct(result.rows[0]));
 });
 
-// Mantengo tu endpoint admin para crear productos (ahora con más campos)
-app.post("/api/products", authMiddleware, requireRole('admin'), async (req, res) => {
+// Admin crea/edita productos (se mantiene)
+app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res) => {
   const { name, price, stock, image_url, active, category, store_id, seller_id } = req.body;
   const result = await pool.query(
     `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [name, price, stock||0, image_url||null, active!==false, category||null, store_id||null, seller_id||null]
+    [name, price, stock || 0, image_url || null, active !== false, category || null, store_id || null, seller_id || null]
   );
   res.json(mapProduct(result.rows[0]));
 });
 
-app.put("/api/products/:id", authMiddleware, requireRole('admin'), async (req, res) => {
+app.put("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
   const { name, price, stock, image_url, active, category, store_id, seller_id } = req.body;
   const result = await pool.query(
     `UPDATE products SET
@@ -287,7 +346,7 @@ app.put("/api/products/:id", authMiddleware, requireRole('admin'), async (req, r
   res.json(mapProduct(result.rows[0]));
 });
 
-app.delete("/api/products/:id", authMiddleware, requireRole('admin'), async (req, res) => {
+app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
   await pool.query("DELETE FROM products WHERE id=$1", [req.params.id]);
   res.json({ message: "Deleted" });
 });
@@ -299,7 +358,11 @@ app.get("/api/cart/:userId", async (req, res) => {
 });
 app.post("/api/cart/:userId", async (req, res) => {
   const { productId, quantity } = req.body;
-  await pool.query("INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3)", [req.params.userId, productId, quantity]);
+  await pool.query("INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3)", [
+    req.params.userId,
+    productId,
+    quantity,
+  ]);
   const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
   res.json(result.rows);
 });
@@ -311,45 +374,48 @@ app.delete("/api/cart/:userId/:productId", async (req, res) => {
 
 // ================= PEDIDOS (con invitado) =================
 app.post("/api/orders", async (req, res) => {
-  // Acepta ambas variantes de payload
   const userId = req.body.userId || req.user?.id || null;
   const itemsRaw = req.body.items || [];
-  const items = itemsRaw.map(i => ({
-    productId: i.productId || i.product_id,
-    quantity: i.quantity || i.qty
-  })).filter(i => i.productId && i.quantity > 0);
+  const items = itemsRaw
+    .map((i) => ({
+      productId: i.productId || i.product_id,
+      quantity: i.quantity || i.qty,
+    }))
+    .filter((i) => i.productId && i.quantity > 0);
 
-  const fulfillment_type = req.body.fulfillment_type || 'pickup';
+  const fulfillment_type = req.body.fulfillment_type || "pickup";
   const guest_name = req.body.guest_name || null;
   const guest_phone = req.body.guest_phone || null;
   const address = req.body.address || null;
 
   if (!items.length) return res.status(400).json({ error: "Empty items" });
 
-  const productIds = items.map(i => i.productId);
+  const productIds = items.map((i) => i.productId);
   const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
 
   let subtotal = 0;
   for (const it of items) {
-    const p = r.rows.find(x => x.id === it.productId);
+    const p = r.rows.find((x) => x.id === it.productId);
     if (p) subtotal += Number(p.price) * it.quantity;
   }
-  const delivery = fulfillment_type === 'delivery' ? 2000 : 0;
+  const delivery = fulfillment_type === "delivery" ? 2000 : 0;
   const total = subtotal + delivery;
 
   const orderResult = await pool.query(
     "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-    [userId || null, total, 'CREATED', fulfillment_type, guest_name, guest_phone, address]
+    [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
   );
   const order = orderResult.rows[0];
 
   for (const it of items) {
-    const p = r.rows.find(x => x.id === it.productId);
+    const p = r.rows.find((x) => x.id === it.productId);
     const unit = p ? Number(p.price) : 0;
-    await pool.query(
-      "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)",
-      [order.id, it.productId, it.quantity, unit]
-    );
+    await pool.query("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)", [
+      order.id,
+      it.productId,
+      it.quantity,
+      unit,
+    ]);
   }
 
   res.json({
@@ -360,8 +426,8 @@ app.post("/api/orders", async (req, res) => {
       total_xaf: Number(order.total),
       status: order.status,
       fulfillment_type: order.fulfillment_type,
-      created_at: order.created_at
-    }
+      created_at: order.created_at,
+    },
   });
 });
 
@@ -371,25 +437,25 @@ app.get("/api/orders/:userId", async (req, res) => {
 });
 
 // ================= ADMIN =================
-app.get("/api/admin/users", authMiddleware, requireRole('admin'), async (req, res) => {
+app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
   const r = await pool.query("SELECT * FROM users ORDER BY id DESC");
   res.json({ users: r.rows.map(mapUser) });
 });
 
-app.post("/api/admin/create-seller", authMiddleware, requireRole('admin'), async (req, res) => {
+app.post("/api/admin/create-seller", authMiddleware, requireRole("admin"), async (req, res) => {
   const { name, email, password, phone, store_name } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: "Faltan campos" });
   const passwordHash = await bcrypt.hash(password, 10);
   try {
     const u = await pool.query(
-      "INSERT INTO users (email, password_hash, name, phone, role, is_admin) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
-      [email, passwordHash, name, phone || null, 'seller', false]
+      "INSERT INTO users (email, password_hash, name, phone, role, is_admin, is_seller) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+      [email, passwordHash, name, phone || null, "seller", false, true]
     );
     const sellerId = u.rows[0].id;
-    const s = await pool.query(
-      "INSERT INTO stores (name, seller_user_id) VALUES ($1,$2) RETURNING *",
-      [store_name || name + "'s Store", sellerId]
-    );
+    const s = await pool.query("INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING *", [
+      store_name || `${name}'s Store`,
+      sellerId,
+    ]);
     res.json({ seller_user_id: sellerId, store_id: s.rows[0].id });
   } catch (e) {
     res.status(400).json({ error: "No se pudo crear el vendedor (email duplicado?)" });
@@ -397,50 +463,66 @@ app.post("/api/admin/create-seller", authMiddleware, requireRole('admin'), async
 });
 
 // ================= SELLER =================
-app.get("/api/seller/products", authMiddleware, requireRole('seller'), async (req, res) => {
+app.get("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
   const r = await pool.query("SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC", [req.user.id]);
   res.json({ products: r.rows.map(mapProduct) });
 });
 
-app.post("/api/seller/products", authMiddleware, requireRole('seller'), async (req, res) => {
+// 👇 Clave: si el vendedor no tiene tienda, se crea automáticamente
+app.post("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
   const { name, price, stock, image_url, active, category } = req.body;
-  // buscar la store del vendedor
-  const storeR = await pool.query("SELECT id FROM stores WHERE seller_user_id=$1 LIMIT 1", [req.user.id]);
-  const storeId = storeR.rows[0]?.id || null;
+
+  // buscar / crear la store del vendedor
+  let storeR = await pool.query("SELECT id FROM stores WHERE seller_user_id=$1 LIMIT 1", [req.user.id]);
+  if (storeR.rows.length === 0) {
+    const userR = await pool.query("SELECT name, email FROM users WHERE id=$1", [req.user.id]);
+    const baseName = userR.rows[0]?.name || userR.rows[0]?.email || "Mi Tienda";
+    storeR = await pool.query(
+      "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING id",
+      [baseName, req.user.id]
+    );
+  }
+  const storeId = storeR.rows[0].id;
+
   const r = await pool.query(
     `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [name, price, stock||0, image_url||null, active!==false, category||null, storeId, req.user.id]
+    [name, price, stock || 0, image_url || null, active !== false, category || null, storeId, req.user.id]
   );
   res.json({ product: mapProduct(r.rows[0]) });
 });
 
-app.get("/api/seller/orders", authMiddleware, requireRole('seller'), async (req, res) => {
-  // pedidos que contienen productos de este seller
-  const r = await pool.query(`
+app.get("/api/seller/orders", authMiddleware, requireRole("seller"), async (req, res) => {
+  const r = await pool.query(
+    `
     SELECT DISTINCT o.*
     FROM orders o
     JOIN order_items oi ON oi.order_id = o.id
     JOIN products p ON p.id = oi.product_id
     WHERE p.seller_id = $1
     ORDER BY o.id DESC
-  `, [req.user.id]);
+  `,
+    [req.user.id]
+  );
 
   const orders = [];
   for (const o of r.rows) {
-    const itemsR = await pool.query(`
+    const itemsR = await pool.query(
+      `
       SELECT oi.product_id, oi.quantity, oi.unit_price, p.name
       FROM order_items oi
       JOIN products p ON p.id = oi.product_id
       WHERE oi.order_id=$1 AND p.seller_id=$2
-    `, [o.id, req.user.id]);
-    const items = itemsR.rows.map(it => ({
+    `,
+      [o.id, req.user.id]
+    );
+    const items = itemsR.rows.map((it) => ({
       product_id: it.product_id,
       title: it.name,
       qty: it.quantity,
-      unit_price_xaf: Number(it.unit_price)
+      unit_price_xaf: Number(it.unit_price),
     }));
-    const subtotal = items.reduce((s,i)=>s + i.unit_price_xaf * i.qty, 0);
+    const subtotal = items.reduce((s, i) => s + i.unit_price_xaf * i.qty, 0);
     orders.push({
       id: o.id,
       created_at: o.created_at,
@@ -451,21 +533,23 @@ app.get("/api/seller/orders", authMiddleware, requireRole('seller'), async (req,
       status: o.status,
       subtotal_xaf: subtotal,
       total_xaf: Number(o.total),
-      items
+      items,
     });
   }
   res.json({ orders });
 });
 
-app.put("/api/seller/orders/:id/status", authMiddleware, requireRole('seller'), async (req, res) => {
+app.put("/api/seller/orders/:id/status", authMiddleware, requireRole("seller"), async (req, res) => {
   const { status } = req.body;
-  // Autorización mínima: el pedido debe tener items de este seller
-  const authR = await pool.query(`
+  const authR = await pool.query(
+    `
     SELECT 1
     FROM order_items oi JOIN products p ON p.id = oi.product_id
     WHERE oi.order_id=$1 AND p.seller_id=$2
     LIMIT 1
-  `, [req.params.id, req.user.id]);
+  `,
+    [req.params.id, req.user.id]
+  );
   if (authR.rows.length === 0) return res.status(403).json({ error: "No autorizado" });
 
   await pool.query("UPDATE orders SET status=$1 WHERE id=$2", [status, req.params.id]);
@@ -473,4 +557,5 @@ app.put("/api/seller/orders/:id/status", authMiddleware, requireRole('seller'), 
 });
 
 // ================= START =================
+app.get("/", (_req, res) => res.send("✅ API WapMarket funcionando"));
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
