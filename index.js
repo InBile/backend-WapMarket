@@ -71,8 +71,10 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
-      price NUMERIC NOT NULL
+      price NUMERIC NOT NULL,
+      seller_user_id INT REFERENCES users(id) ON DELETE SET NULL
     );
+
 
     -- ========= CART =========
     CREATE TABLE IF NOT EXISTS cart (
