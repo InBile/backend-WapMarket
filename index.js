@@ -75,7 +75,8 @@ async function initDb() {
       data BYTEA NOT NULL,
       mime TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    );
+  `);   
 
 
   // Pedidos
