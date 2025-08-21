@@ -91,7 +91,8 @@ async function initDb() {
   `);
 }
 
-// Admin por defecto + semilla mínima
+
+// Admin por defecto sin demo store ni productos
 async function seed() {
   const adminEmail = "admin@wapmarket.com";
   const adminPass = "admin123";
@@ -99,33 +100,16 @@ async function seed() {
   const { rows } = await pool.query("SELECT id FROM users WHERE email=$1", [adminEmail]);
   if (!rows.length) {
     const passwordHash = await bcrypt.hash(adminPass, 10);
-    const ins = await pool.query(
-      "INSERT INTO users (name,email,phone,password_hash,role,is_admin) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+    await pool.query(
+      "INSERT INTO users (name,email,phone,password_hash,role,is_admin) VALUES ($1,$2,$3,$4,$5,$6)",
       ["Admin", adminEmail, null, passwordHash, "admin", true]
     );
     console.log(`✅ Admin creado: ${adminEmail} / ${adminPass}`);
-
-    // Crea una tienda demo para facilitar pruebas del front
-    const { rows: srows } = await pool.query(
-      "INSERT INTO stores (name, owner_id) VALUES ($1,$2) RETURNING id",
-      ["WapMarket Demo", ins.rows[0].id]
-    );
-    const storeId = srows[0].id;
-
-    // Unos productos demo
-    await pool.query(
-      `INSERT INTO products (title, price_xaf, store_id, stock, image_url, category, active)
-       VALUES
-       ('Arroz 1kg', 1500, $1, 50, 'https://via.placeholder.com/220x160?text=Arroz', 'alimentos', true),
-       ('Aceite 1L', 2500, $1, 40, 'https://via.placeholder.com/220x160?text=Aceite', 'alimentos', true),
-       ('Camiseta', 5000, $1, 20, 'https://via.placeholder.com/220x160?text=Camiseta', 'ropa', true)
-      `,
-      [storeId]
-    );
   } else {
-    console.log("⚡ Admin ya existe; semilla básica omitida.");
+    console.log("⚡ Admin ya existe.");
   }
 }
+
 
 // ================== AUTH ==================
 function authRequired(req, res, next) {
