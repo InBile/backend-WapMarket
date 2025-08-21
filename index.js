@@ -2,7 +2,7 @@
 // Endpoints compatibles con el frontend actual (stores, products, auth, admin, seller, orders)
 
 const express = require("express");
-const cors = require("cors");
+const cors = require("cors"); 
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
@@ -10,6 +10,13 @@ const { Pool } = require("pg");
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+const multer = require("multer");
+const sharp = require("sharp");
+
+// Configuración de multer (máx 5 MB en memoria, validamos después)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
 
 // ================== CONFIG ==================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
@@ -60,6 +67,16 @@ async function initDb() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  //imagenes
+   await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_images (
+      id SERIAL PRIMARY KEY,
+      product_id INT REFERENCES products(id) ON DELETE CASCADE,
+      data BYTEA NOT NULL,
+      mime TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 
   // Pedidos
   await pool.query(`
@@ -172,6 +189,48 @@ app.post("/api/auth/login", async (req, res) => {
     }
   });
 });
+// Subir imagen de producto
+app.post("/api/products/:id/image", authRequired, requireRole("seller", "admin"), upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    // Optimizar imagen a formato webp y limitar tamaño
+    const optimized = await sharp(req.file.buffer)
+      .resize(800, 800, { fit: "inside" }) // máximo 800x800
+      .webp({ quality: 80 }) // formato webp comprimido
+      .toBuffer();
+
+    if (optimized.length > 1 * 1024 * 1024) {
+      return res.status(400).json({ error: "Image too large after compression (max 1MB)" });
+    }
+
+    // Guardar en la BD
+    await pool.query("INSERT INTO product_images (product_id, data, mime) VALUES ($1, $2, $3)", [
+      req.params.id,
+      optimized,
+      "image/webp"
+    ]);
+
+    res.json({ success: true, message: "Image uploaded" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error uploading image" });
+  }
+});
+
+// Servir imagen de producto
+app.get("/api/products/:id/image", async (req, res) => {
+  const { rows } = await pool.query(
+    "SELECT data, mime FROM product_images WHERE product_id=$1 ORDER BY created_at DESC LIMIT 1",
+    [req.params.id]
+  );
+
+  if (!rows.length) return res.status(404).send("No image found");
+
+  res.set("Content-Type", rows[0].mime);
+  res.send(rows[0].data);
+});
+
 
 // Perfil
 app.get("/api/profile", authRequired, async (req, res) => {
