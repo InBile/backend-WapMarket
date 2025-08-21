@@ -48,68 +48,54 @@ const mapUser = (u) => ({
 // Crear/alterar tablas si no existen
 async function initDb() {
   await pool.query(`
-  ALTER TABLE users ADD COLUMN IF NOT EXISTS is_seller BOOLEAN DEFAULT false;
-  ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE CASCADE;
-  ALTER TABLE products ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0;
-  ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
-  ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT;
-
-    );
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'buyer';
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-
-    -- Tiendas (negocios) básicas
-    CREATE TABLE IF NOT EXISTS stores (
+    CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      seller_user_id INT REFERENCES users(id) ON DELETE CASCADE,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      is_admin BOOLEAN DEFAULT false
     );
-
-    -- Productos
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       price NUMERIC NOT NULL
     );
-    ALTER TABLE products ADD COLUMN IF NOT EXISTS store_id INT REFERENCES stores(id) ON DELETE SET NULL;
-    ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_id INT REFERENCES users(id) ON DELETE SET NULL;
-    ALTER TABLE products ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0;
-    ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
-    ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
-    ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT;
-
-    -- Carrito (no lo toco; lo mantengo por compatibilidad)
     CREATE TABLE IF NOT EXISTS cart (
       id SERIAL PRIMARY KEY,
       user_id INT REFERENCES users(id) ON DELETE CASCADE,
       product_id INT REFERENCES products(id) ON DELETE CASCADE,
       quantity INT NOT NULL
     );
-
-    -- Pedidos
     CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
-      user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
       total NUMERIC NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'CREATED';
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT DEFAULT 'pickup';
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS guest_name TEXT;
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS guest_phone TEXT;
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS address TEXT;
-
     CREATE TABLE IF NOT EXISTS order_items (
       id SERIAL PRIMARY KEY,
       order_id INT REFERENCES orders(id) ON DELETE CASCADE,
       product_id INT REFERENCES products(id),
       quantity INT NOT NULL
     );
-    ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC;
   `);
+
+  -- 🔥 añadimos la columna si no existe
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name='products'
+        AND column_name='seller_user_id'
+      ) THEN
+        ALTER TABLE products ADD COLUMN seller_user_id INT REFERENCES users(id);
+      END IF;
+    END
+    $$;
+  `);
+}
+
 }
 
 initDb().catch(console.error);
