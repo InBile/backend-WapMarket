@@ -110,6 +110,24 @@ async function initDb() {
     );
     ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC;
   `);
+  async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (...);
+    CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      price NUMERIC NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS cart (...);
+    CREATE TABLE IF NOT EXISTS orders (...);
+    CREATE TABLE IF NOT EXISTS order_items (...);
+  `);
+
+  // 👇 Parche seguro
+  await pool.query(`
+    ALTER TABLE products 
+    ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE SET NULL;
+  `);
 }
 
 initDb().catch(console.error);
