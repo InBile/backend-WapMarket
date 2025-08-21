@@ -1,116 +1,189 @@
+// Backend extendido con Express + PostgreSQL en Railway
+// Maneja usuarios, autenticación JWT, productos, carrito y pedidos
+
 const express = require("express");
-const admin = require("firebase-admin");
+const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
+// ================= CONFIG =================
+const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
 const PORT = process.env.PORT || 3000;
 
-console.log("DEBUG: GOOGLE_APPLICATION_CREDENTIALS_JSON length =", process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON?.length);
+// ================= POSTGRES =================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-
-// 🔹 Inicialización segura de Firebase
-let db = null;
-
-if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-  try {
-    const serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    db = admin.firestore();
-    console.log("✅ Firebase Admin inicializado en Railway");
-  } catch (err) {
-    console.error("❌ Error al inicializar Firebase:", err);
-  }
-} else {
-  console.warn("⚠️ No se encontraron credenciales en GOOGLE_APPLICATION_CREDENTIALS_JSON");
+// Crear tablas si no existen
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      is_admin BOOLEAN DEFAULT false
+    );
+    CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      price NUMERIC NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS cart (
+      id SERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      product_id INT REFERENCES products(id) ON DELETE CASCADE,
+      quantity INT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS orders (
+      id SERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      total NUMERIC NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS order_items (
+      id SERIAL PRIMARY KEY,
+      order_id INT REFERENCES orders(id) ON DELETE CASCADE,
+      product_id INT REFERENCES products(id),
+      quantity INT NOT NULL
+    );
+  `);
 }
 
-// 🔹 Ruta raíz
-app.get("/", (req, res) => {
-  res.send(`
-    <html>
-      <head><meta charset="utf-8"><title>WapMarket</title></head>
-      <body style="font-family:Arial,Helvetica,sans-serif">
-        <h1>🚀 WapMarket Backend en Railway</h1>
-        <p>Servidor en ejecución. Prueba la API: <a href="/api">/api</a></p>
-      </body>
-    </html>
-  `);
-});
+initDb().catch(console.error);
 
-// 🔹 Ruta de prueba
-app.get("/api", (req, res) => {
-  res.json({ msg: "🚀 Backend WapMarket funcionando en Railway" });
-});
-
-// 🔹 Ruta para crear admin manualmente
-app.post("/api/setup-admin", async (req, res) => {
-  if (!db) {
-    return res.status(500).json({ error: "Firestore no disponible" });
-  }
-
+// ================= MIDDLEWARE =================
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader) return res.status(401).json({ error: "No token provided" });
+  const token = authHeader.split(" ")[1];
   try {
-    const ref = db.collection("users").doc("admin");
-    const doc = await ref.get();
-
-    if (!doc.exists) {
-      const hash = bcrypt.hashSync("admin123", 10);
-      await ref.set({
-        name: "Administrador",
-        email: "admin@wapmarket.local",
-        password_hash: hash,
-        role: "admin",
-        phone: "+240555558213",
-        created_at: admin.firestore.FieldValue.serverTimestamp()
-      });
-      return res.json({ success: true, msg: "✅ Admin creado correctamente" });
-    } else {
-      return res.json({ success: false, msg: "ℹ️ Admin ya existe" });
-    }
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
   } catch (err) {
-    console.error("❌ Error creando admin:", err);
-    res.status(500).json({ error: "Error en servidor" });
+    res.status(401).json({ error: "Invalid token" });
+  }
+}
+
+// ================= USUARIOS =================
+app.post("/api/register", async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    await pool.query("INSERT INTO users (email, password_hash) VALUES ($1, $2)", [email, passwordHash]);
+    res.json({ message: "User registered" });
+  } catch (err) {
+    res.status(400).json({ error: "Email already registered" });
   }
 });
 
-// 🔹 Ejemplo de pedidos
+app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body;
+  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+  const user = result.rows[0];
+  if (!user) return res.status(400).json({ error: "User not found" });
+
+  const valid = await bcrypt.compare(password, user.password_hash);
+  if (!valid) return res.status(400).json({ error: "Invalid password" });
+
+  const token = jwt.sign({ id: user.id, email: user.email, isAdmin: user.is_admin }, JWT_SECRET, { expiresIn: "1h" });
+  res.json({ token });
+});
+
+app.get("/api/profile", authMiddleware, async (req, res) => {
+  const result = await pool.query("SELECT id, email, is_admin FROM users WHERE id=$1", [req.user.id]);
+  res.json(result.rows[0]);
+});
+
+// ================= PRODUCTOS =================
+app.get("/api/products", async (req, res) => {
+  const result = await pool.query("SELECT * FROM products");
+  res.json(result.rows);
+});
+
+app.get("/api/products/:id", async (req, res) => {
+  const result = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
+  if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
+  res.json(result.rows[0]);
+});
+
+app.post("/api/products", authMiddleware, async (req, res) => {
+  if (!req.user.isAdmin) return res.status(403).json({ error: "Not authorized" });
+  const { name, price } = req.body;
+  const result = await pool.query("INSERT INTO products (name, price) VALUES ($1, $2) RETURNING *", [name, price]);
+  res.json(result.rows[0]);
+});
+
+app.put("/api/products/:id", authMiddleware, async (req, res) => {
+  if (!req.user.isAdmin) return res.status(403).json({ error: "Not authorized" });
+  const { name, price } = req.body;
+  const result = await pool.query("UPDATE products SET name=$1, price=$2 WHERE id=$3 RETURNING *", [name, price, req.params.id]);
+  res.json(result.rows[0]);
+});
+
+app.delete("/api/products/:id", authMiddleware, async (req, res) => {
+  if (!req.user.isAdmin) return res.status(403).json({ error: "Not authorized" });
+  await pool.query("DELETE FROM products WHERE id=$1", [req.params.id]);
+  res.json({ message: "Deleted" });
+});
+
+// ================= CARRITO =================
+app.get("/api/cart/:userId", async (req, res) => {
+  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
+  res.json(result.rows);
+});
+
+app.post("/api/cart/:userId", async (req, res) => {
+  const { productId, quantity } = req.body;
+  await pool.query("INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3)", [req.params.userId, productId, quantity]);
+  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
+  res.json(result.rows);
+});
+
+app.delete("/api/cart/:userId/:productId", async (req, res) => {
+  await pool.query("DELETE FROM cart WHERE user_id=$1 AND product_id=$2", [req.params.userId, req.params.productId]);
+  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
+  res.json(result.rows);
+});
+
+// ================= PEDIDOS =================
 app.post("/api/orders", async (req, res) => {
-  try {
-    const { store_id, items, fulfillment_type, guest_name, guest_phone, address } = req.body;
+  const { userId, items } = req.body;
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "Debes incluir al menos 1 producto en items" });
-    }
+  // Calcular total
+  const productIds = items.map(i => i.productId);
+  const result = await pool.query(`SELECT * FROM products WHERE id = ANY($1::int[])`, [productIds]);
+  let total = 0;
+  items.forEach(i => {
+    const product = result.rows.find(p => p.id === i.productId);
+    if (product) total += Number(product.price) * i.quantity;
+  });
 
-    const order = {
-      store_id: store_id || null,
-      items,
-      fulfillment_type: fulfillment_type || "pickup", // pickup o delivery
-      guest_name: guest_name || null,
-      guest_phone: guest_phone || null,
-      address: address || "",
-      created_at: new Date().toISOString()
-    };
+  // Crear pedido
+  const orderResult = await pool.query("INSERT INTO orders (user_id, total) VALUES ($1, $2) RETURNING *", [userId, total]);
+  const order = orderResult.rows[0];
 
-    if (db) {
-      const ref = await db.collection("orders").add(order);
-      return res.json({ success: true, order_id: ref.id });
-    } else {
-      // Si Firestore no está configurado, devolvemos respuesta simulada
-      return res.json({ success: true, message: "Pedido recibido (modo simulado)", order });
-    }
-  } catch (err) {
-    console.error("❌ Error en /api/orders:", err);
-    res.status(500).json({ error: "Error en el servidor" });
+  // Insertar items
+  for (const i of items) {
+    await pool.query("INSERT INTO order_items (order_id, product_id, quantity) VALUES ($1, $2, $3)", [order.id, i.productId, i.quantity]);
   }
+
+  res.json(order);
 });
 
-// 🔹 Iniciar servidor
-app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+app.get("/api/orders/:userId", async (req, res) => {
+  const result = await pool.query("SELECT * FROM orders WHERE user_id=$1", [req.params.userId]);
+  res.json(result.rows);
 });
+
+// ================= START =================
+app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+
 
