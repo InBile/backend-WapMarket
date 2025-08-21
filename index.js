@@ -118,9 +118,6 @@ async function initDb() {
 
 }
 
-  `);
-  async function initDb() {
-  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (...);
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
