@@ -48,11 +48,12 @@ const mapUser = (u) => ({
 // Crear/alterar tablas si no existen
 async function initDb() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      is_admin BOOLEAN DEFAULT false
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS is_seller BOOLEAN DEFAULT false;
+  ALTER TABLE products ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE CASCADE;
+  ALTER TABLE products ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0;
+  ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
+  ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT;
+
     );
     ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
@@ -177,7 +178,16 @@ async function handleLogin(req, res) {
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) return res.status(400).json({ error: "Invalid password" });
 
-  const payload = { id: user.id, email: user.email, isAdmin: user.is_admin, role: user.role || (user.is_admin ? 'admin' : 'buyer') };
+  const role = user.role || (user.is_admin ? 'admin' : (user.is_seller ? 'seller' : 'buyer'));
+
+  const payload = { 
+    id: user.id, 
+    email: user.email, 
+    isAdmin: user.is_admin, 
+    role, 
+    isSeller: user.is_seller   // 👈 ahora el token lleva info de vendedor
+  };
+
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
   res.json({ token, user: mapUser(user) });
 }
