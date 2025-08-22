@@ -145,7 +145,6 @@ async function initDb() {
     END $$;
   `);
 
-
   // Columnas que podrían faltar (parche idempotente)
   await pool.query(`
     -- stores
