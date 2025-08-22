@@ -191,35 +191,6 @@ async function createDefaultAdmin() {
 }
 createDefaultAdmin().catch(console.error);
 
-const express = require("express");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
-
-const app = express();
-app.use(express.json());
-
-// ==== CORS PERMITIENDO TU FRONT ====
-const allowedOrigins = [
-  "http://localhost:3000",
-  "https://wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app",
-  "https://wapmarket-frontend-782avncnc-romans-projects-0350dc58.vercel.app"
-];
-
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS: " + origin));
-    }
-  },
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
-
-
 // ================= MIDDLEWARE =================
 function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"];
