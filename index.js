@@ -228,20 +228,34 @@ function authMiddlewareOptional(req, _res, next) {
 }
 
 
-// ================= AUTH =================
 async function handleRegister(req, res) {
   const { email, password, name, phone, role } = req.body;
   try {
+    // 1. Verificar si ya existe
+    const existing = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: "El email ya está en uso" });
+    }
+
+    // 2. Crear hash y guardar
     const passwordHash = await bcrypt.hash(password, 10);
     const r = await pool.query(
       "INSERT INTO users (email, password_hash, name, phone, role) VALUES ($1, $2, $3, $4, $5) RETURNING *",
       [email, passwordHash, name || null, phone || null, role || "buyer"]
     );
-    res.json({ message: "User registered", user: mapUser(r.rows[0]) });
-  } catch {
-    res.status(400).json({ error: "Email already registered" });
+    const user = mapUser(r.rows[0]);
+
+    // 3. Generar token de login directo
+    const payload = { id: user.id, email: user.email, role: user.role };
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+
+    return res.json({ message: "User registered", token, user });
+  } catch (err) {
+    console.error("Error en registro:", err);
+    return res.status(500).json({ error: "Error interno al registrar usuario" });
   }
 }
+
 async function handleLogin(req, res) {
   const { email, password } = req.body;
   const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
