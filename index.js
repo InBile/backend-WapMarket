@@ -117,7 +117,8 @@ async function initDb() {
       unit_price NUMERIC
     );
   `);
-    // ========= ORDERS: parcheo columnas que podrían faltar =========
+  
+  // ========= ORDERS: parcheo columnas que podrían faltar =========
   await pool.query(`
     ALTER TABLE orders
       ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL,
@@ -130,7 +131,7 @@ async function initDb() {
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   `);
 
-  -- migración suave si existía una columna antigua
+  // migración suave si existía una columna antigua
   await pool.query(`
     DO $$
     BEGIN
@@ -144,6 +145,7 @@ async function initDb() {
       END IF;
     END $$;
   `);
+
 
   // Columnas que podrían faltar (parche idempotente)
   await pool.query(`
