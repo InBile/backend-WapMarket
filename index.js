@@ -43,6 +43,19 @@ const mapUser = (u) => ({
   created_at: u.created_at,
 });
 
+// === Helpers de compatibilidad (alias + parseo de precio) ===
+const getFirst = (...vals) =>
+  vals.find((v) => v !== undefined && v !== null && String(v).trim() !== "");
+
+const parsePrice = (raw) => {
+  if (raw === undefined || raw === null) return null;
+  // Acepta números y strings tipo "2.500", "2,500", "2500 XAF"
+  const cleaned = String(raw).replace(/[^0-9]/g, "");
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+};
+
 // ================= DB INIT + PARCHEO SEGURO =================
 async function initDb() {
   // Tablas base (no fallan si ya existen)
@@ -74,7 +87,6 @@ async function initDb() {
       price NUMERIC NOT NULL,
       seller_user_id INT REFERENCES users(id) ON DELETE SET NULL
     );
-
 
     -- ========= CART =========
     CREATE TABLE IF NOT EXISTS cart (
@@ -143,7 +155,7 @@ async function initDb() {
     END $$;
   `);
 
-  // Migración suave: si productos antiguos usan seller_user_id, copia a seller_id
+  // Migración suave: si productos antiguos usan seller_user_id, copiar a seller_id
   await pool.query(`
     DO $$
     BEGIN
@@ -224,7 +236,7 @@ async function handleLogin(req, res) {
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) return res.status(400).json({ error: "Invalid password" });
 
-  const role = user.role || (user.is_admin ? "admin" : (user.is_seller ? "seller" : "buyer"));
+  const role = user.role || (user.is_admin ? "admin" : user.is_seller ? "seller" : "buyer");
   const payload = {
     id: user.id,
     email: user.email,
@@ -247,8 +259,8 @@ app.get("/api/profile", authMiddleware, async (req, res) => {
 });
 
 // ================= STORES (NEGOCIOS) =================
-// Tolerante a esquemas viejos para evitar 42703 en producción
-app.get("/api/stores", async (req, res) => {
+// Función común para listar stores con fallback si la columna cambia entre despliegues
+async function loadStoresRows() {
   try {
     const r = await pool.query(`
       SELECT 
@@ -264,10 +276,10 @@ app.get("/api/stores", async (req, res) => {
       LEFT JOIN users u ON u.id = s.seller_user_id
       ORDER BY s.id DESC
     `);
-    return res.json({ stores: r.rows });
+    return r.rows;
   } catch (e) {
-    // Si la columna no existe aún (42703), caer al plan B con seller_id
     if (e && e.code === "42703") {
+      // Fallback para esquemas viejos con seller_id
       const r2 = await pool.query(`
         SELECT 
           s.id, 
@@ -282,20 +294,33 @@ app.get("/api/stores", async (req, res) => {
         LEFT JOIN users u ON u.id = s.seller_id
         ORDER BY s.id DESC
       `);
-      return res.json({ stores: r2.rows });
+      return r2.rows;
     }
-    console.error(e);
-    return res.status(500).json({ error: "Cannot load stores" });
+    throw e;
+  }
+}
+
+app.get("/api/stores", async (_req, res) => {
+  try {
+    const rows = await loadStoresRows();
+    res.json({ stores: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Cannot load stores" });
   }
 });
 
 // Aliases comunes por si el frontend usa otros paths
-app.get("/api/shops", async (req, res) => {
-  const { rows } = await pool.query(`SELECT id, name, seller_user_id, active, created_at FROM stores ORDER BY id DESC`);
+app.get("/api/shops", async (_req, res) => {
+  const rows = await loadStoresRows();
   res.json({ stores: rows });
 });
-app.get("/api/businesses", async (req, res) => {
-  const { rows } = await pool.query(`SELECT id, name, seller_user_id, active, created_at FROM stores ORDER BY id DESC`);
+app.get("/api/businesses", async (_req, res) => {
+  const rows = await loadStoresRows();
+  res.json({ stores: rows });
+});
+app.get("/api/negocios", async (_req, res) => {
+  const rows = await loadStoresRows();
   res.json({ stores: rows });
 });
 
@@ -319,19 +344,50 @@ app.get("/api/products/:id", async (req, res) => {
   res.json(mapProduct(result.rows[0]));
 });
 
-// Admin crea/edita productos (se mantiene)
+// Admin crea/edita productos (acepta alias y parsea precio)
 app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res) => {
-  const { name, price, stock, image_url, active, category, store_id, seller_id } = req.body;
-  const result = await pool.query(
-    `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [name, price, stock || 0, image_url || null, active !== false, category || null, store_id || null, seller_id || null]
-  );
-  res.json(mapProduct(result.rows[0]));
+  try {
+    const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
+    const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
+    const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
+    const image_url = getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null;
+    const active = req.body.active === false ? false : true;
+    const category = getFirst(req.body.category, req.body.categoria, req.body.cat) || null;
+    const store_id = req.body.store_id || null;
+    const seller_id = req.body.seller_id || null;
+
+    if (!name) return res.status(400).json({ error: "Falta el nombre del producto" });
+    if (price === null) return res.status(400).json({ error: "Falta o es inválido el precio" });
+
+    const result = await pool.query(
+      `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [name, price, stock, image_url, active, category, store_id, seller_id]
+    );
+    res.json(mapProduct(result.rows[0]));
+  } catch (err) {
+    console.error("Error admin creando producto:", err);
+    res.status(500).json({ error: "No se pudo crear el producto" });
+  }
 });
 
 app.put("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
-  const { name, price, stock, image_url, active, category, store_id, seller_id } = req.body;
+  // También aceptamos alias en updates
+  const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
+  const priceParsed = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
+  const stockParsed = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty));
+
+  const updates = {
+    name: name ?? null,
+    price: Number.isFinite(priceParsed) ? priceParsed : null,
+    stock: Number.isFinite(stockParsed) ? stockParsed : null,
+    image_url: getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null,
+    active: typeof req.body.active === "boolean" ? req.body.active : null,
+    category: getFirst(req.body.category, req.body.categoria, req.body.cat) || null,
+    store_id: req.body.store_id ?? null,
+    seller_id: req.body.seller_id ?? null,
+  };
+
   const result = await pool.query(
     `UPDATE products SET
       name=COALESCE($1,name),
@@ -343,7 +399,17 @@ app.put("/api/products/:id", authMiddleware, requireRole("admin"), async (req, r
       store_id=COALESCE($7,store_id),
       seller_id=COALESCE($8,seller_id)
      WHERE id=$9 RETURNING *`,
-    [name, price, stock, image_url, active, category, store_id, seller_id, req.params.id]
+    [
+      updates.name,
+      updates.price,
+      updates.stock,
+      updates.image_url,
+      updates.active,
+      updates.category,
+      updates.store_id,
+      updates.seller_id,
+      req.params.id,
+    ]
   );
   res.json(mapProduct(result.rows[0]));
 });
@@ -454,10 +520,10 @@ app.post("/api/admin/create-seller", authMiddleware, requireRole("admin"), async
       [email, passwordHash, name, phone || null, "seller", false, true]
     );
     const sellerId = u.rows[0].id;
-    const s = await pool.query("INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING *", [
-      store_name || `${name}'s Store`,
-      sellerId,
-    ]);
+    const s = await pool.query(
+      "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING *",
+      [store_name || `${name}'s Store`, sellerId]
+    );
     res.json({ seller_user_id: sellerId, store_id: s.rows[0].id });
   } catch (e) {
     res.status(400).json({ error: "No se pudo crear el vendedor (email duplicado?)" });
@@ -470,28 +536,43 @@ app.get("/api/seller/products", authMiddleware, requireRole("seller"), async (re
   res.json({ products: r.rows.map(mapProduct) });
 });
 
-// 👇 Clave: si el vendedor no tiene tienda, se crea automáticamente
+// Vendedor crea producto (acepta alias, parsea precio y autocrea tienda si falta)
 app.post("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
-  const { name, price, stock, image_url, active, category } = req.body;
+  try {
+    // Alias del frontend y parseo robusto
+    const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
+    const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
+    const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
+    const image_url = getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null;
+    const active = req.body.active === false ? false : true;
+    const category = getFirst(req.body.category, req.body.categoria, req.body.cat) || null;
 
-  // buscar / crear la store del vendedor
-  let storeR = await pool.query("SELECT id FROM stores WHERE seller_user_id=$1 LIMIT 1", [req.user.id]);
-  if (storeR.rows.length === 0) {
-    const userR = await pool.query("SELECT name, email FROM users WHERE id=$1", [req.user.id]);
-    const baseName = userR.rows[0]?.name || userR.rows[0]?.email || "Mi Tienda";
-    storeR = await pool.query(
-      "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING id",
-      [baseName, req.user.id]
+    if (!name) return res.status(400).json({ error: "Falta el nombre del producto" });
+    if (price === null) return res.status(400).json({ error: "Falta o es inválido el precio" });
+
+    // buscar / crear la store del vendedor
+    let storeR = await pool.query("SELECT id FROM stores WHERE seller_user_id=$1 LIMIT 1", [req.user.id]);
+    if (storeR.rows.length === 0) {
+      const userR = await pool.query("SELECT name, email FROM users WHERE id=$1", [req.user.id]);
+      const baseName = userR.rows[0]?.name || userR.rows[0]?.email || "Mi Tienda";
+      storeR = await pool.query(
+        "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING id",
+        [baseName, req.user.id]
+      );
+    }
+    const storeId = storeR.rows[0].id;
+
+    const r = await pool.query(
+      `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [name, price, stock, image_url, active, category, storeId, req.user.id]
     );
-  }
-  const storeId = storeR.rows[0].id;
 
-  const r = await pool.query(
-    `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [name, price, stock || 0, image_url || null, active !== false, category || null, storeId, req.user.id]
-  );
-  res.json({ product: mapProduct(r.rows[0]) });
+    res.json({ product: mapProduct(r.rows[0]) });
+  } catch (err) {
+    console.error("Error creando producto:", err);
+    res.status(500).json({ error: "No se pudo crear el producto" });
+  }
 });
 
 app.get("/api/seller/orders", authMiddleware, requireRole("seller"), async (req, res) => {
