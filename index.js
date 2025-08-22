@@ -112,10 +112,11 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS order_items (
       id SERIAL PRIMARY KEY,
       order_id INT REFERENCES orders(id) ON DELETE CASCADE,
-      product_id INT REFERENCES products(id),
+      product_id INT REFERENCES products(id) ON DELETE CASCADE,
       quantity INT NOT NULL,
-      unit_price NUMERIC
-    );
+      unit_price NUMERIC NOT NULL
+);
+
   `);
   
   // ========= ORDERS: parcheo columnas que podrían faltar =========
