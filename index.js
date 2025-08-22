@@ -5,24 +5,9 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
-const allowedOrigins = [
-  "http://localhost:3000",
-  "https://wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app",
-  "https://wapmarket-frontend-782avncnc-romans-projects-0350dc58.vercel.app"
-];
-
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS"));
-    }
-  },
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
-
+const app = express();
+app.use(express.json());
+app.use(cors());
 
 // ================= CONFIG =================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
