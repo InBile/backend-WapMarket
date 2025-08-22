@@ -540,9 +540,14 @@ app.post("/api/admin/create-seller", authMiddleware, requireRole("admin"), async
       [store_name || `${name}'s Store`, sellerId]
     );
     res.json({ seller_user_id: sellerId, store_id: s.rows[0].id });
-  } catch (e) {
-    res.status(400).json({ error: "No se pudo crear el vendedor (email duplicado?)" });
+} catch (e) {
+  console.error("Error creando vendedor:", e);
+  if (e.code === "23505") { // Código de error UNIQUE violation en PostgreSQL
+    return res.status(400).json({ error: "Email duplicado" });
   }
+  res.status(500).json({ error: "Error interno al crear vendedor", details: e.message });
+}
+
 });
 
 // ================= SELLER =================
