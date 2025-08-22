@@ -9,6 +9,14 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+const cors = require("cors");
+app.use(cors({
+  origin: "*", // en producción puedes poner tu dominio del frontend
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+
 // ================= CONFIG =================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
 const PORT = process.env.PORT || 3000;
