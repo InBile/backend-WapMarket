@@ -496,20 +496,37 @@ app.post("/api/orders", async (req, res) => {
   const delivery = fulfillment_type === "delivery" ? 2000 : 0;
   const total = subtotal + delivery;
 
-  const orderResult = await pool.query(
-    "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-    [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
-  );
-  const order = orderResult.rows[0];
+  let order;
+  try {
+    const orderResult = await pool.query(
+      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
+    );
+    order = orderResult.rows[0];
+  } catch (e) {
+    // Si falla por columna inexistente, auto-parchea y reintenta una vez
+    if (e && e.code === "42703") {
+      await pool.query(`
+        ALTER TABLE orders
+          ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL
+      `);
+      const orderResult2 = await pool.query(
+        "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+        [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
+      );
+      order = orderResult2.rows[0];
+    } else {
+      console.error(e);
+      return res.status(500).json({ error: "Cannot create order" });
+    }
+  }
 
+  // insertar items
   for (const it of items) {
     const p = r.rows.find((x) => x.id === it.productId);
     const unit = p ? Number(p.price) : 0;
     await pool.query("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)", [
-      order.id,
-      it.productId,
-      it.quantity,
-      unit,
+      order.id, it.productId, it.quantity, unit,
     ]);
   }
 
@@ -525,6 +542,7 @@ app.post("/api/orders", async (req, res) => {
     },
   });
 });
+
 
 app.get("/api/orders/:userId", async (req, res) => {
   const result = await pool.query("SELECT * FROM orders WHERE user_id=$1 ORDER BY id DESC", [req.params.userId]);
