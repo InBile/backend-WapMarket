@@ -495,9 +495,10 @@ app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
       const p = r.rows.find((x) => x.id === it.productId);
       const unit = p ? Number(p.price) : 0;
       await pool.query(
-        "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)",
+        "INSERT INTO order_items (order_id, product_id, quantity, unit_price_xaf) VALUES ($1,$2,$3,$4)",
         [order.id, it.productId, it.quantity, unit]
-      );
+    );
+
     }
 
     res.json({
