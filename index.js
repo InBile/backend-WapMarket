@@ -1,593 +1,895 @@
-/* =========================
-   WapMarket — Frontend glue
-   ========================= */
+/* app.js — WapMarket: Frontend conectado a tu backend
+   - Productos públicos (guest checkout)
+   - Filtro por negocios (stores)
+   - Carrito con cierre por click-afuera / ESC / vaciado
+   - Checkout invitado + render de factura
+   - Seller dashboard (productos propios + pedidos + acciones de estado)
+   - Admin (usuarios + crear vendedor/tienda)
+*/
 
-// ==== Ajusta tu backend aquí ====
 const API_BASE = "https://backend-wapmarket-production.up.railway.app/api";
 
-// ==== Utilidades básicas ====
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const toJSON = (r) => (r.ok ? r.json() : r.json().then(e => Promise.reject(e)));
-const money = (n) => new Intl.NumberFormat("es-GQ").format(Number(n || 0));
-const ls = {
-  get: (k, d = null) => {
-    try { return JSON.parse(localStorage.getItem(k)); } catch { return d; }
-  },
-  set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
-  del: (k) => localStorage.removeItem(k),
-};
-const AUTH_USER_KEY = "wap_user";
-const AUTH_TOKEN_KEY = "wap_token";
-const CART_KEY = "wap_cart";
-const CART_STORE_KEY = "wap_cart_store_id";
-const SELECTED_STORE_KEY = "wap_selected_store";
+/* ==========================
+   Utilidades generales
+========================== */
+const $  = (sel, ctx = document) => ctx.querySelector(sel);
+const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
 
-// ==== Sesión ====
-function getSession() {
-  return {
-    user: ls.get(AUTH_USER_KEY),
-    token: ls.get(AUTH_TOKEN_KEY),
-  };
+const currency = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) + " XAF";
+
+function getAuth() {
+  const token = localStorage.getItem("wap_token");
+  const userRaw = localStorage.getItem("wap_user");
+  let user = null;
+  try { user = JSON.parse(userRaw || "null"); } catch {}
+  return { token, user };
 }
-function setSession(token, user) {
-  ls.set(AUTH_TOKEN_KEY, token);
-  ls.set(AUTH_USER_KEY, user);
-  updateTopbar();
+function setAuth({ token, user }) {
+  if (token) localStorage.setItem("wap_token", token);
+  if (user)  localStorage.setItem("wap_user", JSON.stringify(user));
 }
-function clearSession() {
-  ls.del(AUTH_TOKEN_KEY);
-  ls.del(AUTH_USER_KEY);
-  // Limpio carrito al cerrar sesión por coherencia
-  clearCart(true);
-  updateTopbar();
-}
-function authHeaders(h = {}) {
-  const { token } = getSession();
-  return token ? { ...h, Authorization: `Bearer ${token}` } : h;
-}
-function api(path, opts = {}) {
-  const headers = authHeaders({ "Content-Type": "application/json", ...(opts.headers || {}) });
-  return fetch(`${API_BASE}${path}`, { ...opts, headers }).then(toJSON);
+function clearAuth() {
+  localStorage.removeItem("wap_token");
+  localStorage.removeItem("wap_user");
 }
 
-// ==== Topbar: saludo dinámico + logout ====
-// Index trae <a href="login.html">Entrar</a> y botón carrito (#cartBtn) en la nav.  :contentReference[oaicite:5]{index=5}
-function updateTopbar() {
-  const nav = $(".topbar .nav");
+function authHeaders(extra = {}) {
+  const { token } = getAuth();
+  const headers = { "Content-Type": "application/json", ...extra };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function httpJson(path, opts = {}, fallbacks = []) {
+  const urls = [API_BASE + path, ...fallbacks.map(f => API_BASE + f)];
+  let lastErr;
+
+  for (const u of urls) {
+    try {
+      const res = await fetch(u, opts);
+
+      // Intentamos parsear el cuerpo como JSON siempre
+      const txt = await res.text();
+      let data;
+      try {
+        data = txt ? JSON.parse(txt) : {};
+      } catch {
+        data = { raw: txt };
+      }
+
+      // Si la respuesta no es OK, devolvemos el error del backend
+      if (!res.ok) {
+        const msg = data.error || data.message || `${res.status} ${res.statusText}`;
+        throw new Error(msg);
+      }
+
+      // Si es OK, devolvemos los datos
+      return data;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+/* ==========================
+   Estado global (frontend)
+========================== */
+let SELECTED_STORE_ID = null; // Para filtro de productos por negocio
+
+
+/* ==========================
+   Tienda seleccionada + título + topbar
+========================== */
+let STORES_CACHE = [];
+
+function getSelectedStore() {
+  if (SELECTED_STORE_ID == null) return null;
+  return (STORES_CACHE || []).find(s => Number(s.id) === Number(SELECTED_STORE_ID)) || null;
+}
+
+function ensureCartScopedToStore(storeId) {
+  const current = localStorage.getItem("wap_cart_store");
+  const nextStr = storeId != null ? String(storeId) : "";
+  if (current !== nextStr) {
+    // Cambió de tienda -> vaciamos el carrito y persistimos la nueva tienda
+    saveCart([]);
+  }
+  localStorage.setItem("wap_cart_store", nextStr);
+  updateCartCount();
+}
+
+function updateProductsTitle() {
+  const el = $("#productsTitle");
+  if (!el) return;
+  const s = getSelectedStore();
+  el.textContent = s ? `Productos de ${s.name}` : "Productos Disponibles";
+}
+
+function updateUserTopbar() {
+  const nav = $("#userSection") || $(".nav");
   if (!nav) return;
-
-  const { user } = getSession();
-
-  // Conserva botón carrito si existe
-  const cartBtn = $("#cartBtn")?.outerHTML || "";
-
-  if (user) {
-    const name = user.name || user.email;
-    const role = user.role || (user.is_admin ? "admin" : "buyer");
-
-    let roleLink = "";
-    if (role === "seller") roleLink = `<a href="seller.html" title="Panel de vendedor">Vendedor</a>`;
-    if (role === "admin") roleLink = `<a href="admin.html" title="Panel de administrador">Admin</a>`;
-
+  const { token, user } = getAuth();
+  if (token && user) {
+    const name = user.name || user.email || "Usuario";
     nav.innerHTML = `
-      <span>Hola, <strong>${name}</strong></span>
-      ${roleLink}
-      ${cartBtn}
-      <button id="logoutBtn" title="Cerrar sesión">Salir</button>
+      <span class="hello">Hola, ${name.split(" ")[0]}</span>
+      <button id="logoutBtn" class="linklike">Salir</button>
     `;
-
     $("#logoutBtn")?.addEventListener("click", () => {
-      clearSession();
-      // tras logout, vuelvo a home
-      if (!location.pathname.endsWith("index.html")) {
-        location.href = "index.html";
-      } else {
-        // refresco la UI de index si ya estoy aquí
-        refreshCartBadge();
+      clearAuth();
+      // Al cerrar sesión también limpiamos selección de tienda y carrito
+      SELECTED_STORE_ID = null;
+      localStorage.removeItem("wap_selected_store");
+      ensureCartScopedToStore(null);
+      updateProductsTitle();
+      // Si estamos en login, index, seller o admin, refrescamos
+      location.href = "index.html";
+    });
+  } else {
+    nav.innerHTML = `<a href="login.html">Entrar</a>`;
+  }
+}
+/* ==========================
+   Carrito (guest-friendly)
+========================== */
+function loadCart() {
+  try { return JSON.parse(localStorage.getItem("wap_cart") || "[]"); } catch { return []; }
+}
+function saveCart(items) {
+  localStorage.setItem("wap_cart", JSON.stringify(items));
+  updateCartCount();
+}
+function clearCart() { saveCart([]); }
+function addToCart(product) {
+  // Aseguramos que el carrito pertenece a la tienda seleccionada
+  ensureCartScopedToStore(SELECTED_STORE_ID);
+  const cart = loadCart();
+  const idx = cart.findIndex(i => i.id === product.id);
+  if (idx >= 0) cart[idx].qty += 1;
+  else cart.push({
+    id: product.id,
+    title: product.title || product.name || "Producto",
+    price_xaf: Number(product.price_xaf ?? product.price ?? 0),
+    image_url: product.image_url || null,
+    qty: 1
+  });
+  saveCart(cart);
+}
+function cartSubtotal() {
+  return loadCart().reduce((s, i) => s + Number(i.price_xaf || 0) * Number(i.qty || 0), 0);
+}
+function updateCartCount() {
+  const el = $("#cartCount");
+  if (el) el.textContent = loadCart().reduce((s, i) => s + i.qty, 0);
+}
+
+/* ==========================
+   API client
+========================== */
+const api = {
+  /* Auth */
+  async login(email, password) {
+    return await httpJson("/auth/login", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ email, password })
+    }, ["/login"]);
+  },
+  async signup(payload) {
+    return await httpJson("/auth/signup", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload)
+    }, ["/register"]);
+  },
+  async profile() {
+    return await httpJson("/profile", { headers: authHeaders() });
+  },
+
+  /* Stores */
+  async stores() {
+    try {
+      const data = await httpJson("/stores", { headers: authHeaders() }, ["/businesses", "/shops", "/negocios"]);
+      return Array.isArray(data) ? data : (data.stores || []);
+    } catch { return []; }
+  },
+
+  /* Products */
+  async products({ store_id = null } = {}) {
+    const qs = store_id ? `?store_id=${encodeURIComponent(store_id)}` : "";
+    const data = await httpJson(`/products${qs}`, { headers: authHeaders() });
+    return Array.isArray(data) ? data : (data.products || []);
+  },
+  async product(id) {
+    return await httpJson(`/products/${id}`, { headers: authHeaders() });
+  },
+
+  /* Orders */
+  async createOrder(payload) {
+    return await httpJson("/orders", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload)
+    }, ["/checkout"]);
+  },
+
+  /* Seller */
+  seller: {
+    async mineProducts() {
+      const data = await httpJson("/seller/products", { headers: authHeaders() });
+      return Array.isArray(data) ? data : (data.products || []);
+    },
+    async createProduct(p) {
+      return await httpJson("/seller/products", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(p)
+      });
+    },
+    async orders() {
+      const data = await httpJson("/seller/orders", { headers: authHeaders() });
+      return Array.isArray(data) ? data : (data.orders || []);
+    },
+    async setOrderStatus(orderId, status) {
+      return await httpJson(`/seller/orders/${orderId}/status`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ status })
+      });
+    }
+  },
+
+  /* Admin */
+  admin: {
+    async users() {
+      const data = await httpJson("/admin/users", { headers: authHeaders() });
+      return Array.isArray(data) ? data : (data.users || []);
+    },
+    async createSeller(payload) {
+      return await httpJson("/admin/create-seller", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload)
+      });
+    }
+  }
+};
+
+/* ==========================
+   Render helpers (Index)
+========================== */
+function renderProducts(list, container) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!list.length) {
+    container.innerHTML = `<div class="muted">No hay productos disponibles.</div>`;
+    return;
+  }
+
+  for (const p of list) {
+    const title = p.title || p.name || "Producto";
+    const price = Number(p.price_xaf ?? p.price ?? 0);
+    const img = p.image_url || "https://via.placeholder.com/300x200?text=Producto";
+
+    const card = document.createElement("div");
+    card.className = "product-card";
+    card.innerHTML = `
+      <img class="product-thumb" src="${img}" alt="${title}">
+      <div class="product-info">
+        <div class="product-title">${title}</div>
+        <div class="product-price">${currency(price)}</div>
+        <button class="product-btn">Añadir</button>
+      </div>
+    `;
+    $(".product-btn", card).addEventListener("click", () => {
+      addToCart({ id: p.id, title, price_xaf: price, image_url: img });
+      toast("Producto añadido al carrito");
+    });
+    container.appendChild(card);
+  }
+}
+
+function renderStores(list, container) {
+  if (!container) return;
+  container.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "businesses-header";
+  head.innerHTML = `<h3>Negocios</h3><button class="link-btn" id="clearStoreFilter">Todos</button>`;
+  container.appendChild(head);
+
+  const wrap = document.createElement("div");
+  wrap.className = "business-list";
+  container.appendChild(wrap);
+
+  if (!list.length) {
+    wrap.innerHTML = `<div class="muted">Sin negocios</div>`;
+    return;
+  }
+
+  for (const s of list) {
+    const item = document.createElement("button");
+    item.className = "business-item";
+    item.dataset.storeId = s.id;
+    item.innerHTML = `
+      <div class="avatar">${(s.name || "Tienda").slice(0,1).toUpperCase()}</div>
+      <div class="business-meta">
+        <div class="business-name">${s.name || "Tienda"}</div>
+        <div class="business-sub">${(s.product_count ?? 0)} productos</div>
+      </div>
+    `;
+    item.addEventListener("click", async () => {
+      SELECTED_STORE_ID = s.id;
+      localStorage.setItem("wap_selected_store", String(s.id));
+      highlightActiveStore(s.id);
+      ensureCartScopedToStore(s.id);
+      updateProductsTitle();
+      await reloadProducts();
+      toast(`Filtrado por: ${s.name}`);
+    });
+    wrap.appendChild(item);
+  }
+
+  $("#clearStoreFilter")?.addEventListener("click", async () => {
+    SELECTED_STORE_ID = null;
+    highlightActiveStore(null);
+    await reloadProducts();
+  });
+}
+
+function highlightActiveStore(storeId) {
+  $$(".business-item").forEach(btn => {
+    btn.classList.toggle("active", Number(btn.dataset.storeId) === Number(storeId));
+  });
+}
+
+async function reloadProducts() {
+  const container = $("#productsList");
+  if (!container) return;
+  container.innerHTML = `<div class="muted">Cargando productos…</div>`;
+  try {
+    const prods = await api.products({ store_id: SELECTED_STORE_ID });
+    renderProducts(prods, container);
+  } catch (e) {
+    console.error(e);
+    container.innerHTML = `<div class="error">Error cargando productos</div>`;
+  }
+}
+
+/* ==========================
+   Carrito UI / Checkout
+========================== */
+function toast(msg) {
+  let t = $("#toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "toast";
+    t.style.position = "fixed";
+    t.style.bottom = "20px";
+    t.style.left = "50%";
+    t.style.transform = "translateX(-50%)";
+    t.style.padding = "10px 14px";
+    t.style.background = "rgba(0,0,0,.8)";
+    t.style.color = "#fff";
+    t.style.borderRadius = "10px";
+    t.style.fontSize = ".95rem";
+    t.style.zIndex = "9999";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = "1";
+  setTimeout(() => { t.style.opacity = "0"; }, 1400);
+}
+
+function openDrawer() { $("#cartDrawer")?.classList.remove("hidden"); }
+function closeDrawer() { $("#cartDrawer")?.classList.add("hidden"); }
+
+function wireDrawerDismiss() {
+  const drawer = $("#cartDrawer");
+  if (!drawer) return;
+
+  // Cerrar por click fuera: si el overlay es #cartDrawer y el panel es .drawer-panel
+  drawer.addEventListener("click", (e) => {
+    const panel = $(".drawer-panel", drawer) || $("#cartPanel") || null;
+    if (panel && !panel.contains(e.target)) closeDrawer();
+    else if (!panel) closeDrawer(); // fallback si no existe panel
+  });
+
+  // Cerrar por tecla ESC
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeDrawer();
+  });
+}
+
+function renderCart() {
+  const list = $("#cartItems");
+  const subtotalEl = $("#subtotalXAF");
+  if (!list) return;
+
+  const items = loadCart();
+  list.innerHTML = "";
+
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.className = "cart-row";
+    row.innerHTML = `
+      <img class="cart-thumb" src="${it.image_url || "https://via.placeholder.com/64"}" alt="">
+      <div class="cart-meta">
+        <div class="cart-title">${it.title}</div>
+        <div class="cart-sub">${currency(it.price_xaf)} × ${it.qty}</div>
+      </div>
+      <div class="cart-qty">
+        <button class="qty minus">−</button>
+        <span class="qty-value">${it.qty}</span>
+        <button class="qty plus">+</button>
+        <button class="remove" title="Quitar">✕</button>
+      </div>
+    `;
+    $(".minus", row).addEventListener("click", () => {
+      it.qty = Math.max(1, it.qty - 1);
+      saveCart(items);
+      renderCart();
+    });
+    $(".plus", row).addEventListener("click", () => {
+      it.qty += 1;
+      saveCart(items);
+      renderCart();
+    });
+    $(".remove", row).addEventListener("click", () => {
+      const next = items.filter(x => x.id !== it.id);
+      saveCart(next);
+      renderCart();
+      if (!next.length) {
+        closeDrawer();
+        toast("Carrito vacío");
       }
     });
-  } else {
-    // Si no hay sesión, vuelve a poner "Entrar" + carrito si estaba
-    nav.innerHTML = `
-      <a href="login.html">Entrar</a>
-      ${cartBtn}
-    `;
-  }
-}
-
-// ==== Carrito (ligado a tienda seleccionada) ====
-function loadCart() {
-  return {
-    items: ls.get(CART_KEY, []),          // [{id, title, price_xaf, qty, image_url}]
-    storeId: ls.get(CART_STORE_KEY, null) // id de la tienda asociada a estos items
-  };
-}
-function saveCart(cart) {
-  ls.set(CART_KEY, cart.items);
-  ls.set(CART_STORE_KEY, cart.storeId);
-  refreshCartBadge();
-  renderCartDrawer(); // si está abierto, actualiza
-}
-function clearCart(keepStore = false) {
-  const storeId = keepStore ? ls.get(CART_STORE_KEY, null) : null;
-  saveCart({ items: [], storeId });
-}
-function resetCartForStore(newStoreId) {
-  const currentStoreId = ls.get(CART_STORE_KEY, null);
-  if (currentStoreId !== newStoreId) {
-    saveCart({ items: [], storeId: newStoreId });
-  }
-}
-function addToCart(product, qty = 1) {
-  const cart = loadCart();
-  if (cart.storeId == null) {
-    // Primera vez: liga carrito a la tienda del producto
-    cart.storeId = product.store_id ?? ls.get(SELECTED_STORE_KEY, null);
-  }
-  // Seguridad: si el producto pertenece a otra tienda, resetea
-  if (cart.storeId !== (product.store_id ?? ls.get(SELECTED_STORE_KEY, null))) {
-    saveCart({ items: [], storeId: product.store_id ?? ls.get(SELECTED_STORE_KEY, null) });
+    list.appendChild(row);
   }
 
-  const idx = cart.items.findIndex(i => i.id === product.id);
-  if (idx >= 0) {
-    cart.items[idx].qty += qty;
-  } else {
-    cart.items.push({
-      id: product.id,
-      title: product.name || product.title,
-      price_xaf: Number(product.price_xaf ?? product.price ?? 0),
-      qty,
-      image_url: product.image_url || null,
-      store_id: product.store_id ?? null
-    });
-  }
-  saveCart(cart);
-}
-function removeFromCart(productId) {
-  const cart = loadCart();
-  cart.items = cart.items.filter(i => i.id !== productId);
-  saveCart(cart);
-}
-function refreshCartBadge() {
-  const count = loadCart().items.reduce((s, i) => s + i.qty, 0);
-  const badge = $("#cartCount");
-  if (badge) badge.textContent = count;
+  if (subtotalEl) subtotalEl.textContent = currency(cartSubtotal());
+  updateCheckoutSummary();
 }
 
-// ==== Drawer del carrito + checkout (index) ====
-function initCartUI() {
-  const cartBtn = $("#cartBtn");
-  const drawer = $("#cartDrawer");
-  const closeCart = $("#closeCart");
-  const checkoutOpen = $("#checkoutOpen");
-  const closeCheckout = $("#closeCheckout");
-  const checkoutModal = $("#checkoutModal");
-  const checkoutForm = $("#checkoutForm");
-  const fulfillmentType = $("#fulfillmentType");
+function updateCheckoutSummary() {
+  const subtotal = cartSubtotal();
+  const typeSel = $("#fulfillmentType");
+  const deliveryFee = (typeSel && typeSel.value === "delivery") ? 2000 : 0;
+
   const coSubtotal = $("#coSubtotal");
   const coDelivery = $("#coDelivery");
   const coTotal = $("#coTotal");
+  if (coSubtotal) coSubtotal.textContent = currency(subtotal);
+  if (coDelivery) coDelivery.textContent = currency(deliveryFee);
+  if (coTotal)     coTotal.textContent = currency(subtotal + deliveryFee);
+}
 
-  if (cartBtn && drawer) {
-    cartBtn.addEventListener("click", () => drawer.classList.remove("hidden"));
+function renderInvoice({ order, submittedItems, buyer }) {
+  // Crea una factura sencilla dentro del modal de checkout
+  const wrap = $("#invoiceBox");
+  if (!wrap) return;
+
+  const date = new Date(order.created_at || Date.now());
+  const itemsHtml = submittedItems.map(i => `
+    <tr>
+      <td>${i.title}</td>
+      <td style="text-align:center">${i.quantity}</td>
+      <td style="text-align:right">${currency(i.unit_price_xaf || i.price_xaf)}</td>
+    </tr>
+  `).join("");
+
+  wrap.innerHTML = `
+    <div class="invoice">
+      <div class="invoice-head">
+        <div>
+          <h3>Factura</h3>
+          <div class="muted">Pedido #${order.id}</div>
+        </div>
+        <div class="muted" style="text-align:right">
+          ${date.toLocaleDateString()} ${date.toLocaleTimeString().slice(0,5)}
+        </div>
+      </div>
+      <div class="invoice-meta">
+        <div><strong>Cliente:</strong> ${buyer?.name || buyer?.guest_name || "Invitado"}</div>
+        <div><strong>Teléfono:</strong> ${buyer?.phone || buyer?.guest_phone || "-"}</div>
+        ${order.fulfillment_type === "delivery" ? `<div><strong>Dirección:</strong> ${buyer?.address || "-"}</div>` : ""}
+        <div><strong>Entrega:</strong> ${order.fulfillment_type.toUpperCase()}</div>
+        <div><strong>Estado:</strong> ${order.status}</div>
+      </div>
+      <table class="invoice-table">
+        <thead><tr><th>Producto</th><th>Cant.</th><th>Precio</th></tr></thead>
+        <tbody>${itemsHtml}</tbody>
+      </table>
+      <div class="invoice-total">
+        <div><span>Total</span><strong>${currency(order.total_xaf)}</strong></div>
+      </div>
+      <div class="invoice-actions">
+        <button id="invoicePrint">Imprimir</button>
+        <button id="invoiceClose">Cerrar</button>
+      </div>
+    </div>
+  `;
+
+  $("#invoicePrint")?.addEventListener("click", () => {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(`
+      <html><head><title>Factura #${order.id}</title>
+      <style>
+        body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:20px;}
+        h3{margin:0 0 8px}
+        table{width:100%;border-collapse:collapse;margin-top:10px}
+        th,td{border:1px solid #ddd;padding:8px}
+        th{text-align:left;background:#f7f7f7}
+        .right{text-align:right}
+      </style></head>
+      <body>
+        ${$("#invoiceBox").innerHTML}
+      </body></html>
+    `);
+    w.document.close();
+    w.focus();
+    w.print();
+  });
+  $("#invoiceClose")?.addEventListener("click", () => {
+    const modal = $("#checkoutModal");
+    modal?.classList.add("hidden");
+  });
+}
+
+/* ==========================
+   Inicialización por página
+========================== */
+document.addEventListener("DOMContentLoaded", () => {
+  updateUserTopbar();
+  updateCartCount();
+
+  const isIndex  = !!$("#productsList");
+  const isLogin  = !!$("#loginForm") || !!$("#signupForm");
+  const isSeller = !!$("#sellerOrders") || !!$("#newProductForm");
+  const isAdmin  = !!$("#createSellerForm");
+
+  if (isIndex)  bootIndexPage();
+  if (isLogin)  bootAuthPage();
+  if (isSeller) bootSellerPage();
+  if (isAdmin)  bootAdminPage();
+});
+
+/* ==========================
+   Página: Index (tienda)
+========================== */
+
+async function bootIndexPage() {
+  updateUserTopbar();
+
+  const businessesSection = $("#businessesSection");
+  const productsContainer = $("#productsList");
+
+  try {
+    // 1) Cargar tiendas
+    const stores = await api.stores();
+    STORES_CACHE = stores || [];
+    // 2) Seleccionar tienda por defecto
+    const saved = localStorage.getItem("wap_selected_store");
+    if (saved && STORES_CACHE.some(s => String(s.id) === String(saved))) {
+      SELECTED_STORE_ID = Number(saved);
+    } else {
+      SELECTED_STORE_ID = STORES_CACHE[0]?.id ?? null;
+      if (SELECTED_STORE_ID != null) localStorage.setItem("wap_selected_store", String(SELECTED_STORE_ID));
+    }
+    ensureCartScopedToStore(SELECTED_STORE_ID);
+    // 3) Pintar sidebar + título
+    renderStores(STORES_CACHE, businessesSection);
+    updateProductsTitle();
+    // 4) Cargar productos de la tienda activa
+    const prods = await api.products({ store_id: SELECTED_STORE_ID });
+    renderProducts(prods, productsContainer);
+  } catch (e) {
+    console.error(e);
+    productsContainer.innerHTML = `<div class="error">Error cargando productos</div>`;
   }
-  if (closeCart && drawer) {
-    closeCart.addEventListener("click", () => drawer.classList.add("hidden"));
-  }
-  if (checkoutOpen && checkoutModal) {
-    checkoutOpen.addEventListener("click", () => {
-      drawer.classList.add("hidden");
-      checkoutModal.classList.remove("hidden");
-      // precalcula totales
-      updateCheckoutTotals();
+
+  // Filtros / búsqueda locales
+  const searchInput = $("#searchInput");
+  const searchBtn   = $("#searchBtn");
+  let currentProducts = [];
+  try { currentProducts = await api.products({ store_id: SELECTED_STORE_ID }); } catch {}
+
+  const applyFilters = async () => {
+    const q   = (searchInput?.value || "").toLowerCase().trim();
+    const min = Number($("#minPriceFilter")?.value || 0);
+    const max = Number($("#maxPriceFilter")?.value || 1e12);
+    const cat = ($("#categoryFilter")?.value || "").toLowerCase();
+
+    let products = [];
+    try { products = await api.products({ store_id: SELECTED_STORE_ID }); } catch {}
+    const filtered = products.filter(p => {
+      const title = (p.title || p.name || "").toLowerCase();
+      const price = Number(p.price_xaf ?? p.price ?? 0);
+      const c = (p.category || "").toLowerCase();
+      return (!q || title.includes(q)) && price >= min && price <= max && (!cat || !c || c === cat);
     });
-  }
-  if (closeCheckout && checkoutModal) {
-    closeCheckout.addEventListener("click", () => checkoutModal.classList.add("hidden"));
-  }
-  function updateCheckoutTotals() {
-    const cart = loadCart();
-    const subtotal = cart.items.reduce((s, i) => s + (i.price_xaf * i.qty), 0);
-    const delivery = fulfillmentType?.value === "delivery" ? 2000 : 0;
-    if (coSubtotal) coSubtotal.textContent = money(subtotal);
-    if (coDelivery) coDelivery.textContent = money(delivery);
-    if (coTotal) coTotal.textContent = money(subtotal + delivery);
-  }
-  fulfillmentType?.addEventListener("change", updateCheckoutTotals);
+    renderProducts(filtered, productsContainer);
+  };
+  if (searchBtn)   searchBtn.addEventListener("click", applyFilters);
+  if (searchInput) searchInput.addEventListener("keydown", e => { if (e.key === "Enter") applyFilters(); });
 
+  // Drawer carrito
+  const cartBtn   = $("#cartBtn");
+  const closeCart = $("#closeCart");
+  cartBtn?.addEventListener("click", () => { renderCart(); openDrawer(); });
+  closeCart?.addEventListener("click", closeDrawer);
+  wireDrawerDismiss();
+
+  // Checkout modal
+  const checkoutOpen  = $("#checkoutOpen");
+  const checkoutModal = $("#checkoutModal");
+  const closeCheckout = $("#closeCheckout");
+  const fulfillmentType = $("#fulfillmentType");
+
+  checkoutOpen?.addEventListener("click", () => {
+    renderCart();
+    $("#invoiceBox") && ($("#invoiceBox").innerHTML = ""); // limpia factura previa
+    checkoutModal?.classList.remove("hidden");
+    updateCheckoutSummary();
+  });
+  closeCheckout?.addEventListener("click", () => {
+    checkoutModal?.classList.add("hidden");
+  });
+  fulfillmentType?.addEventListener("change", updateCheckoutSummary);
+
+  // Checkout submit
+  const checkoutForm = $("#checkoutForm");
   checkoutForm?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const cart = loadCart();
-    if (!cart.items.length) {
-      alert("Tu carrito está vacío.");
-      return;
-    }
+    const items = loadCart().map(i => ({ productId: i.id, quantity: i.qty }));
+    if (!items.length) return alert("Tu carrito está vacío");
+
     const fd = new FormData(checkoutForm);
     const payload = {
-      items: cart.items.map(i => ({ productId: i.id, quantity: i.qty })),
+      items,
       fulfillment_type: fd.get("fulfillment_type") || "pickup",
       guest_name: fd.get("guest_name") || null,
       guest_phone: fd.get("guest_phone") || null,
-      address: fd.get("address") || null,
+      address: fd.get("address") || null
     };
+
     try {
-      const res = await api("/orders", { method: "POST", body: JSON.stringify(payload) });
-      alert(`✅ Pedido creado (ID ${res.order_id}). ¡Gracias!`);
-      clearCart(true); // mantiene store seleccionada
-      $("#checkoutModal")?.classList.add("hidden");
+      const order = await api.createOrder(payload);
+      toast("Pedido creado con éxito");
+      const submittedItems = loadCart().map(i => ({ title: i.title, quantity: i.qty, price_xaf: i.price_xaf, unit_price_xaf: i.price_xaf }));
+      clearCart();
+      renderInvoice({ order: order.order || order, submittedItems, buyer: { name: payload.guest_name, phone: payload.guest_phone, address: payload.address } });
     } catch (err) {
       console.error(err);
-      alert(err?.error || "No se pudo crear el pedido");
+      alert("No se pudo crear el pedido");
     }
   });
-
-  renderCartDrawer();
-  refreshCartBadge();
-}
-function renderCartDrawer() {
-  const container = $("#cartItems");
-  const subtotalEl = $("#subtotalXAF");
-  if (!container) return;
-  const cart = loadCart();
-  container.innerHTML = "";
-  let subtotal = 0;
-
-  cart.items.forEach(item => {
-    subtotal += item.price_xaf * item.qty;
-    const row = document.createElement("div");
-    row.className = "cart-row";
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.justifyContent = "space-between";
-    row.style.gap = ".5rem";
-    row.style.padding = ".4rem 0";
-    row.innerHTML = `
-      <div style="display:flex;align-items:center;gap:.5rem;max-width:70%">
-        <img src="${item.image_url || "https://via.placeholder.com/60x60?text=%20"}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:.35rem;background:#eee">
-        <div style="overflow:hidden">
-          <div style="font-weight:600;white-space:nowrap;text-overflow:ellipsis;overflow:hidden">${item.title}</div>
-          <div style="font-size:.9rem;color:#555">${money(item.price_xaf)} XAF</div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:.35rem">
-        <button data-act="dec" data-id="${item.id}">−</button>
-        <span>${item.qty}</span>
-        <button data-act="inc" data-id="${item.id}">+</button>
-        <button data-act="del" data-id="${item.id}" title="Quitar">✕</button>
-      </div>
-    `;
-    container.appendChild(row);
-  });
-
-  container.addEventListener("click", (e) => {
-    const btn = e.target.closest("button");
-    if (!btn) return;
-    const id = Number(btn.getAttribute("data-id"));
-    const act = btn.getAttribute("data-act");
-    const cart = loadCart();
-    const idx = cart.items.findIndex(i => i.id === id);
-    if (idx < 0) return;
-    if (act === "inc") cart.items[idx].qty += 1;
-    if (act === "dec") cart.items[idx].qty = Math.max(1, cart.items[idx].qty - 1);
-    if (act === "del") cart.items.splice(idx, 1);
-    saveCart(cart);
-  }, { once: true }); // re-engancha en cada render
-
-  if (subtotalEl) subtotalEl.textContent = money(subtotal);
 }
 
-// ==== Index: tiendas + productos (solo de la tienda seleccionada) ====
-let STATE = {
-  stores: [],
-  selectedStoreId: null,
-  allProducts: [], // productos de la tienda seleccionada
-  filters: {
-    q: "",
-    category: "",
-    min: 0,
-    max: 100000
-  }
-};
 
-async function loadStores() {
-  const r = await api("/stores"); // devuelve { stores: [...] }
-  STATE.stores = r.stores || [];
-  renderStores();
-  // Selección inicial: la última elegida o la primera disponible
-  const saved = ls.get(SELECTED_STORE_KEY, null);
-  const initial = STATE.stores.find(s => s.id === saved) ? saved : STATE.stores[0]?.id ?? null;
-  if (initial) await selectStore(initial);
-}
-
-// La columna izquierda está vacía en tu HTML; la lleno con título, buscador y lista.  :contentReference[oaicite:6]{index=6}
-function renderStores() {
-  const host = $("#businessesSection");
-  if (!host) return;
-  host.innerHTML = `
-    <h3>Negocios</h3>
-    <div class="business-search">
-      <input id="storeSearch" placeholder="Buscar negocio...">
-    </div>
-    <div class="business-list" id="businessList"></div>
-  `;
-
-  const list = $("#businessList");
-  const search = $("#storeSearch");
-
-  function draw(items) {
-    list.innerHTML = items.map(s => `
-      <button class="business-item" data-id="${s.id}" style="${STATE.selectedStoreId===s.id ? 'background:#f9fafb' : ''}">
-        <img src="https://via.placeholder.com/32x32?text=%20" alt="">
-        <div>
-          <div class="business-name">${s.name}</div>
-          <div class="business-category">${(s.product_count ?? 0)} productos</div>
-        </div>
-      </button>
-    `).join("");
-  }
-  draw(STATE.stores);
-
-  list.addEventListener("click", async (e) => {
-    const btn = e.target.closest(".business-item");
-    if (!btn) return;
-    const id = Number(btn.dataset.id);
-    await selectStore(id);
-    // re-dibuja para marcar activa
-    draw(STATE.stores);
-  });
-
-  search?.addEventListener("input", () => {
-    const q = search.value.trim().toLowerCase();
-    const filtered = !q ? STATE.stores : STATE.stores.filter(s => (s.name || "").toLowerCase().includes(q));
-    draw(filtered);
-  });
-}
-
-async function selectStore(storeId) {
-  STATE.selectedStoreId = Number(storeId);
-  ls.set(SELECTED_STORE_KEY, STATE.selectedStoreId);
-  resetCartForStore(STATE.selectedStoreId);
-
-  // Título de sección
-  const store = STATE.stores.find(s => s.id === STATE.selectedStoreId);
-  const title = $("#productsTitle");
-  if (title) title.textContent = store ? `Productos de ${store.name}` : "Productos disponibles";
-
-  // Carga productos de esa tienda
-  const r = await api(`/products?store_id=${STATE.selectedStoreId}`);
-  STATE.allProducts = (r.products || []);
-  fillCategories(STATE.allProducts);
-  renderProducts();
-}
-
-function currentFilteredProducts() {
-  const { q, category, min, max } = STATE.filters;
-  return STATE.allProducts.filter(p => {
-    const name = (p.name || p.title || "").toLowerCase();
-    const okQ = !q || name.includes(q.toLowerCase());
-    const cat = (p.category || "").toLowerCase();
-    const okCat = !category || cat === category.toLowerCase();
-    const price = Number(p.price_xaf ?? p.price ?? 0);
-    const okMin = price >= (Number(min) || 0);
-    const okMax = price <= (Number(max) || 999999999);
-    return okQ && okCat && okMin && okMax;
-  });
-}
-function fillCategories(products) {
-  const catSel = $("#categoryFilter");
-  if (!catSel) return;
-  const cats = [...new Set(products.map(p => (p.category || "").trim()).filter(Boolean))].sort();
-  catSel.innerHTML = `<option value="">Todas las categorías</option>` + cats.map(c => `<option>${c}</option>`).join("");
-}
-function renderProducts() {
-  const host = $("#productsList");
-  if (!host) return;
-  const items = currentFilteredProducts();
-  host.innerHTML = items.map(p => `
-    <div class="product-card">
-      <img src="${p.image_url || 'https://via.placeholder.com/300x160?text=%20'}" alt="">
-      <div class="product-info">
-        <div class="product-title">${p.name || p.title}</div>
-        <div class="product-price">${money(p.price_xaf ?? p.price)} XAF</div>
-        <button class="product-btn" data-id="${p.id}">Añadir al carrito</button>
-      </div>
-    </div>
-  `).join("");
-
-  host.addEventListener("click", async (e) => {
-    const btn = e.target.closest(".product-btn");
-    if (!btn) return;
-    const id = Number(btn.getAttribute("data-id"));
-    const product = STATE.allProducts.find(x => x.id === id);
-    if (!product) return;
-    addToCart(product, 1);
-  }, { once: true });
-}
-
-function initIndexFilters() {
-  const q = $("#searchInput");                // ya existe en topbar de index  :contentReference[oaicite:7]{index=7}
-  const qBtn = $("#searchBtn");               // idem
-  const cat = $("#categoryFilter");
-  const min = $("#minPriceFilter");
-  const max = $("#maxPriceFilter");
-
-  function apply() {
-    STATE.filters = {
-      q: q?.value || "",
-      category: cat?.value || "",
-      min: min?.value || 0,
-      max: max?.value || 100000
-    };
-    renderProducts();
-  }
-  qBtn?.addEventListener("click", apply);
-  q?.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
-  cat?.addEventListener("change", apply);
-  min?.addEventListener("change", apply);
-  max?.addEventListener("change", apply);
-}
-
-// ==== Login & Signup (login.html) ====
-function initAuthPage() {
-  const loginForm = $("#loginForm");
+/* ==========================
+   Página: Login / Signup
+========================== */
+function bootAuthPage() {
+  const loginForm  = $("#loginForm");
   const signupForm = $("#signupForm");
 
   loginForm?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(loginForm);
-    const payload = { email: fd.get("email"), password: fd.get("password") };
+    const email = fd.get("email");
+    const password = fd.get("password");
+
     try {
-      const r = await api("/auth/login", { method: "POST", body: JSON.stringify(payload) });
-      setSession(r.token, r.user);
-      // volver a inicio
-      location.href = "index.html";
-    } catch (err) {
-      alert(err?.error || "No se pudo iniciar sesión");
+      const data = await api.login(email, password);
+      if (data?.token) setAuth({ token: data.token, user: data.user });
+      const role = data?.user?.role || (data?.user?.is_admin ? "admin" : "buyer");
+
+      if (role === "seller")      window.location.href = "seller.html";
+      else if (role === "admin")  window.location.href = "admin.html";
+      else                        window.location.href = "index.html";
+    } catch (e1) {
+      console.error(e1);
+      alert("Credenciales inválidas");
     }
   });
 
   signupForm?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(signupForm);
-    const email = fd.get("email");
-    const password = fd.get("password");
     const payload = {
-      name: fd.get("name"),
-      phone: fd.get("phone"),
-      email,
-      password
-    };
-    try {
-      // Importante: solo llamamos a UN endpoint para evitar duplicados; luego autenticamos.
-      await api("/auth/signup", { method: "POST", body: JSON.stringify(payload) });
-      const loginRes = await api("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
-      setSession(loginRes.token, loginRes.user);
-      location.href = "index.html";
-    } catch (err) {
-      alert(err?.error || "No se pudo crear la cuenta");
-    }
-  });
-}
-
-// ==== Admin (admin.html) ====
-function initAdminPage() {
-  const createSellerForm = $("#createSellerForm");
-  const refreshUsersBtn = $("#refreshUsers");
-  const usersTable = $("#usersTable");
-
-  async function drawUsers() {
-    try {
-      const r = await api("/admin/users");
-      const rows = (r.users || []).map(u => `
-        <tr>
-          <td>${u.id}</td>
-          <td>${u.name || ""}</td>
-          <td>${u.email}</td>
-          <td>${u.phone || ""}</td>
-          <td>${u.role || (u.is_admin ? "admin" : "buyer")}</td>
-          <td>${new Date(u.created_at).toLocaleString()}</td>
-        </tr>
-      `).join("");
-      usersTable.innerHTML = `
-        <table>
-          <thead><tr><th>ID</th><th>Nombre</th><th>Email</th><th>Teléfono</th><th>Rol</th><th>Alta</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      `;
-    } catch (e) {
-      usersTable.innerHTML = `<p style="color:#b91c1c">No se pudieron cargar los usuarios.</p>`;
-    }
-  }
-
-  refreshUsersBtn?.addEventListener("click", drawUsers);
-  createSellerForm?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(createSellerForm);
-    const payload = {
-      name: fd.get("name"),
-      email: fd.get("email"),
+      name:     fd.get("name"),
+      email:    fd.get("email"),
       password: fd.get("password"),
-      phone: fd.get("phone") || null,
-      store_name: fd.get("store_name"),
+      phone:    fd.get("phone") || null
     };
     try {
-      await api("/admin/create-seller", { method: "POST", body: JSON.stringify(payload) });
-      alert("✅ Vendedor y tienda creados");
-      createSellerForm.reset();
-      drawUsers();
-    } catch (err) {
-      alert(err?.error || "Error al crear vendedor");
+      const data = await api.signup(payload);
+      // El backend de signup no devuelve token por defecto; opcionalmente forzamos login posterior
+      // Para mantener UX simple, intentamos login automático:
+      if (payload.email && payload.password) {
+        const autologin = await api.login(payload.email, payload.password);
+        if (autologin?.token) setAuth({ token: autologin.token, user: autologin.user });
+        const role = autologin?.user?.role || (autologin?.user?.is_admin ? "admin" : "buyer");
+        if (role === "seller")     window.location.href = "seller.html";
+        else if (role === "admin") window.location.href = "admin.html";
+        else                       window.location.href = "index.html";
+      } else {
+        window.location.href = "index.html";
+      }
+    } catch (e1) {
+      console.error(e1);
+      alert("No se pudo crear la cuenta");
+    }
+  });
+}
+
+/* ==========================
+   Página: Seller
+========================== */
+function bootSellerPage() {
+  const productsGrid = $("#sellerProducts");
+  const ordersBox    = $("#sellerOrders");
+  const newProdForm  = $("#newProductForm");
+
+  async function refreshProducts() {
+    productsGrid && (productsGrid.innerHTML = `<div class="muted">Cargando…</div>`);
+    try {
+      const list = await api.seller.mineProducts();
+      if (!productsGrid) return;
+      productsGrid.innerHTML = "";
+      if (!list.length) {
+        productsGrid.innerHTML = `<div class="muted">Aún no tienes productos.</div>`;
+        return;
+      }
+      for (const p of list) {
+        const title = p.title || p.name || "Producto";
+        const price = Number(p.price_xaf ?? p.price ?? 0);
+        const img = p.image_url || "https://via.placeholder.com/300x200?text=Producto";
+        const card = document.createElement("div");
+        card.className = "product";
+        card.innerHTML = `
+          <img src="${img}" alt="${title}">
+          <div class="title">${title}</div>
+          <div class="price">${currency(price)}</div>
+        `;
+        productsGrid.appendChild(card);
+      }
+    } catch (e) {
+      console.error(e);
+      productsGrid && (productsGrid.innerHTML = `<div class="error">Error cargando tus productos</div>`);
+    }
+  }
+
+  async function refreshOrders() {
+    ordersBox && (ordersBox.innerHTML = `<div class="muted">Cargando pedidos…</div>`);
+    try {
+      const orders = await api.seller.orders();
+      if (!ordersBox) return;
+      if (!orders.length) {
+        ordersBox.innerHTML = `<div class="muted">Sin pedidos por ahora.</div>`;
+        return;
+      }
+
+      const tbl = document.createElement("table");
+      tbl.className = "orders";
+      tbl.innerHTML = `
+        <thead>
+          <tr>
+            <th>ID</th><th>Fecha</th><th>Cliente</th><th>Items</th><th>Total</th><th>Entrega</th><th>Estado</th><th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+
+      for (const o of orders) {
+        const tr = document.createElement("tr");
+        const when = (o.created_at || "").replace("T", " ").slice(0, 16);
+        const buyer = o.guest_name || o.customer_name || "-";
+        const itemsTxt = (o.items || []).map(i => `${i.title} × ${i.qty}`).join(", ");
+        tr.innerHTML = `
+          <td>${o.id}</td>
+          <td>${when}</td>
+          <td>${buyer}</td>
+          <td>${itemsTxt}</td>
+          <td>${currency(o.total_xaf ?? o.subtotal_xaf)}</td>
+          <td>${String(o.fulfillment_type || "").toUpperCase()}</td>
+          <td><span class="badge">${o.status}</span></td>
+          <td class="actions">
+            <button class="act ready">Ready to Pick up</button>
+            <button class="act delivered">Delivered</button>
+            <button class="act canceled">Cancelled</button>
+          </td>
+        `;
+        // Wiring acciones
+        $(".ready", tr)?.addEventListener("click", async () => {
+          await changeStatus(o.id, "READY_TO_PICKUP");
+        });
+        $(".delivered", tr)?.addEventListener("click", async () => {
+          await changeStatus(o.id, "DELIVERED");
+        });
+        $(".canceled", tr)?.addEventListener("click", async () => {
+          await changeStatus(o.id, "CANCELLED");
+        });
+        $("tbody", tbl).appendChild(tr);
+      }
+
+      ordersBox.innerHTML = "";
+      ordersBox.appendChild(tbl);
+    } catch (e) {
+      console.error(e);
+      ordersBox && (ordersBox.innerHTML = `<div class="error">Error cargando pedidos</div>`);
+    }
+  }
+
+  async function changeStatus(orderId, status) {
+    try {
+      await api.seller.setOrderStatus(orderId, status);
+      toast(`Estado actualizado: ${status}`);
+      await refreshOrders();
+    } catch (e) {
+      console.error(e);
+      alert("No se pudo actualizar el estado");
+    }
+  }
+
+  newProdForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(newProdForm);
+    const payload = {
+      name: fd.get("title") || fd.get("name") || "",
+      price_xaf: fd.get("price_xaf") || fd.get("price") || "",
+      stock: fd.get("stock") || 0,
+      image_url: fd.get("image_url") || null,
+      category: fd.get("category") || null,
+      description: fd.get("description") || null
+    };
+    try {
+      await api.seller.createProduct(payload);
+      newProdForm.reset();
+      toast("Producto creado");
+      await refreshProducts();
+    } catch (e1) {
+      console.error(e1);
+      alert("No se pudo crear el producto");
     }
   });
 
-  // carga inicial
-  if (usersTable) drawUsers();
+  refreshProducts();
+  refreshOrders();
 }
 
-// ==== Seller (seller.html) ====
-function initSellerPage() {
-  const form = $("#newProductForm");
-  const grid = $("#sellerProducts");
-  const ordersBox = $("#sellerOrders");
+/* ==========================
+   Página: Admin
+========================== */
+function bootAdminPage() {
+  const usersWrap = $("#usersTable");
+  const form = $("#createSellerForm");
+  const refreshBtn = $("#refreshUsers");
 
-  async function loadMyProducts() {
+  async function renderUsers() {
+    usersWrap && (usersWrap.innerHTML = "Cargando…");
     try {
-      const r = await api("/seller/products");
-      grid.innerHTML = (r.products || []).map(p => `
-        <div class="card product">
-          <img src="${p.image_url || 'https://via.placeholder.com/300x160?text=%20'}" alt="">
-          <div class="title">${p.name || p.title}</div>
-          <div class="price">${money(p.price_xaf ?? p.price)} XAF</div>
-        </div>
-      `).join("");
-    } catch {
-      grid.innerHTML = `<p style="color:#b91c1c">No se pudieron cargar tus productos.</p>`;
-    }
-  }
-  async function loadMyOrders() {
-    try {
-      const r = await api("/seller/orders");
-      const blocks = (r.orders || []).map(o => `
-        <div class="card" style="margin-bottom:1rem">
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <strong>Pedido #${o.id}</strong>
-            <span>${new Date(o.created_at).toLocaleString()}</span>
-          </div>
-          <div>Cliente: ${o.guest_name || "-"}</div>
-          <div>Teléfono: ${o.guest_phone || "-"}</div>
-          <div>Entrega: ${o.fulfillment_type}</div>
-          <div style="margin:.5rem 0">
-            ${o.items.map(it => `<div>• ${it.title} × ${it.qty} — ${money(it.unit_price_xaf)} XAF</div>`).join("")}
-          </div>
-          <div><strong>Total:</strong> ${money(o.total_xaf)} XAF</div>
-          <div style="margin-top:.5rem">
-            <label>Cambiar estado:
-              <select data-order="${o.id}" class="seller-status">
-                ${["CREATED","CONFIRMED","SHIPPED","DELIVERED","CANCELLED"].map(s => `
-                  <option ${s===o.status ? "selected" : ""} value="${s}">${s}</option>
-                `).join("")}
-              </select>
-            </label>
-          </div>
-        </div>
-      `).join("");
-      ordersBox.innerHTML = blocks || "<p>No tienes pedidos todavía.</p>";
-
-      ordersBox.addEventListener("change", async (e) => {
-        const sel = e.target.closest(".seller-status");
-        if (!sel) return;
-        const id = sel.getAttribute("data-order");
-        try {
-          await api(`/seller/orders/${id}/status`, { method: "PUT", body: JSON.stringify({ status: sel.value }) });
-          alert("Estado actualizado");
-        } catch {
-          alert("No se pudo actualizar el estado");
-        }
-      }, { once: true });
-    } catch {
-      ordersBox.innerHTML = `<p style="color:#b91c1c">No se pudieron cargar los pedidos.</p>`;
+      const list = await api.admin.users();
+      if (!usersWrap) return;
+      const tbl = document.createElement("table");
+      tbl.innerHTML = `<thead><tr><th>Nombre</th><th>Email</th><th>Rol</th><th>Tienda</th></tr></thead><tbody></tbody>`;
+      for (const u of list) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${u.name || "-"}</td>
+          <td>${u.email || "-"}</td>
+          <td>${u.role || (u.is_admin ? "admin" : "buyer")}</td>
+          <td>${u.store_name || u.store?.name || "-"}</td>
+        `;
+        $("tbody", tbl).appendChild(tr);
+      }
+      usersWrap.innerHTML = "";
+      usersWrap.appendChild(tbl);
+    } catch (e) {
+      console.error(e);
+      usersWrap && (usersWrap.innerHTML = `<div class="error">No se pudieron cargar los usuarios</div>`);
     }
   }
 
@@ -595,57 +897,23 @@ function initSellerPage() {
     e.preventDefault();
     const fd = new FormData(form);
     const payload = {
-      title: fd.get("title"),
-      name: fd.get("title"),
-      price_xaf: fd.get("price_xaf"),
-      price: fd.get("price_xaf"),
-      image_url: fd.get("image_url"),
-      stock: Number(fd.get("stock") || 0)
+      name: fd.get("name"),
+      email: fd.get("email"),
+      password: fd.get("password"),
+      phone: fd.get("phone"),
+      store_name: fd.get("store_name")
     };
     try {
-      await api("/seller/products", { method: "POST", body: JSON.stringify(payload) });
+      await api.admin.createSeller(payload);
+      toast("Vendedor creado");
       form.reset();
-      loadMyProducts();
-      alert("✅ Producto creado");
-    } catch (err) {
-      alert(err?.error || "No se pudo crear el producto");
+      renderUsers();
+    } catch (e1) {
+      console.error(e1);
+      alert("No se pudo crear el vendedor");
     }
   });
 
-  loadMyProducts();
-  loadMyOrders();
+  refreshBtn?.addEventListener("click", renderUsers);
+  renderUsers();
 }
-
-// ==== Boot por página ====
-document.addEventListener("DOMContentLoaded", async () => {
-  updateTopbar();
-
-  const path = location.pathname;
-
-  // index.html: sidebar negocios, lista de productos y carrito  :contentReference[oaicite:8]{index=8}
-  if (path.endsWith("/") || path.endsWith("index.html")) {
-    try {
-      await loadStores();
-    } catch (e) {
-      console.error(e);
-      $("#productsList") && ($("#productsList").innerHTML = `<p style="color:#b91c1c">No se pudieron cargar los negocios/productos.</p>`);
-    }
-    initIndexFilters();
-    initCartUI();
-  }
-
-  // login.html: login/registro  :contentReference[oaicite:9]{index=9}
-  if (path.endsWith("login.html")) {
-    initAuthPage();
-  }
-
-  // admin.html  :contentReference[oaicite:10]{index=10}
-  if (path.endsWith("admin.html")) {
-    initAdminPage();
-  }
-
-  // seller.html  :contentReference[oaicite:11]{index=11}
-  if (path.endsWith("seller.html")) {
-    initSellerPage();
-  }
-});
