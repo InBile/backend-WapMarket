@@ -191,27 +191,21 @@ async function createDefaultAdmin() {
 }
 createDefaultAdmin().catch(console.error);
 
-// ================= MIDDLEWARE =================
-function authMiddleware(req, res, next) {
+// ================= MIDDLEWARE OPCIONAL =================
+function authMiddlewareOptional(req, _res, next) {
   const authHeader = req.headers["authorization"];
-  if (!authHeader) return res.status(401).json({ error: "No token provided" });
-  const token = authHeader.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, isAdmin, role, isSeller? }
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+  if (authHeader) {
+    const token = authHeader.split(" ")[1];
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      req.user = decoded;
+    } catch {
+      // Token inválido -> lo ignoramos (pedido de invitado)
+    }
   }
+  next();
 }
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-    const role = req.user.role || (req.user.isAdmin ? "admin" : "buyer");
-    if (role === "admin" || roles.includes(role)) return next();
-    return res.status(403).json({ error: "Not authorized" });
-  };
-}
+
 
 // ================= AUTH =================
 async function handleRegister(req, res) {
@@ -440,69 +434,68 @@ app.delete("/api/cart/:userId/:productId", async (req, res) => {
   res.json(result.rows);
 });
 
-// ================= PEDIDOS (con invitado) =================
-app.post("/api/orders", async (req, res) => {
-  const userId = req.body.userId || req.user?.id || null;
-  const itemsRaw = req.body.items || [];
-  const items = itemsRaw
-    .map((i) => ({
-      productId: i.productId || i.product_id,
-      quantity: i.quantity || i.qty,
-    }))
-    .filter((i) => i.productId && i.quantity > 0);
+// ================= PEDIDOS (con invitado o usuario) =================
+app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
+  try {
+    const userId = req.body.userId || req.user?.id || null;
+    const itemsRaw = req.body.items || [];
+    const items = itemsRaw
+      .map((i) => ({
+        productId: i.productId || i.product_id,
+        quantity: i.quantity || i.qty,
+      }))
+      .filter((i) => i.productId && i.quantity > 0);
 
-  const fulfillment_type = req.body.fulfillment_type || "pickup";
-  const guest_name = req.body.guest_name || null;
-  const guest_phone = req.body.guest_phone || null;
-  const address = req.body.address || null;
+    const fulfillment_type = req.body.fulfillment_type || "pickup";
+    const guest_name = req.body.guest_name || null;
+    const guest_phone = req.body.guest_phone || null;
+    const address = req.body.address || null;
 
-  if (!items.length) return res.status(400).json({ error: "Empty items" });
+    if (!items.length) return res.status(400).json({ error: "Empty items" });
 
-  const productIds = items.map((i) => i.productId);
-  const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
+    const productIds = items.map((i) => i.productId);
+    const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
 
-  let subtotal = 0;
-  for (const it of items) {
-    const p = r.rows.find((x) => x.id === it.productId);
-    if (p) subtotal += Number(p.price) * it.quantity;
+    let subtotal = 0;
+    for (const it of items) {
+      const p = r.rows.find((x) => x.id === it.productId);
+      if (p) subtotal += Number(p.price) * it.quantity;
+    }
+    const delivery = fulfillment_type === "delivery" ? 2000 : 0;
+    const total = subtotal + delivery;
+
+    const orderResult = await pool.query(
+      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
+    );
+    const order = orderResult.rows[0];
+
+    for (const it of items) {
+      const p = r.rows.find((x) => x.id === it.productId);
+      const unit = p ? Number(p.price) : 0;
+      await pool.query(
+        "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)",
+        [order.id, it.productId, it.quantity, unit]
+      );
+    }
+
+    res.json({
+      success: true,
+      order_id: order.id,
+      order: {
+        id: order.id,
+        total_xaf: Number(order.total),
+        status: order.status,
+        fulfillment_type: order.fulfillment_type,
+        created_at: order.created_at,
+      },
+    });
+  } catch (err) {
+    console.error("Error creando pedido:", err);
+    res.status(500).json({ error: "No se pudo crear el pedido" });
   }
-  const delivery = fulfillment_type === "delivery" ? 2000 : 0;
-  const total = subtotal + delivery;
-
-  const orderResult = await pool.query(
-    "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-    [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
-  );
-  const order = orderResult.rows[0];
-
-  for (const it of items) {
-    const p = r.rows.find((x) => x.id === it.productId);
-    const unit = p ? Number(p.price) : 0;
-    await pool.query("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)", [
-      order.id,
-      it.productId,
-      it.quantity,
-      unit,
-    ]);
-  }
-
-  res.json({
-    success: true,
-    order_id: order.id,
-    order: {
-      id: order.id,
-      total_xaf: Number(order.total),
-      status: order.status,
-      fulfillment_type: order.fulfillment_type,
-      created_at: order.created_at,
-    },
-  });
 });
 
-app.get("/api/orders/:userId", async (req, res) => {
-  const result = await pool.query("SELECT * FROM orders WHERE user_id=$1 ORDER BY id DESC", [req.params.userId]);
-  res.json(result.rows);
-});
 
 // ================= ADMIN =================
 app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
