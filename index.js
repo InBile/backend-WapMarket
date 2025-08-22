@@ -11,7 +11,7 @@ app.use(cors());
 
 const cors = require("cors");
 app.use(cors({
-  origin: "*", // en producción puedes poner tu dominio del frontend
+  origin: "wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app", // en producción puedes poner tu dominio del frontend
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
