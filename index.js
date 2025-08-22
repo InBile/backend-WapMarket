@@ -1,659 +1,806 @@
-// Backend Express + PostgreSQL extendido (compat con tu frontend actual)
-const express = require("express");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
+/* app.js — WapMarket frontend conectado al backend Express+Postgres
+   - Login/Registro con roles
+   - Listado de negocios y filtrado de productos por negocio
+   - Carrito (guest) con cierre al clicar fuera o al vaciar
+   - Checkout con mini-factura
+   - Seller dashboard: productos, pedidos y acciones de estado
+   - Admin: crear vendedor y ver usuarios
+*/
 
-const app = express();
-app.use(express.json());
-app.use(cors());
+const API_BASE = "https://backend-wapmarket-production.up.railway.app/api";
 
-// ================= CONFIG =================
-const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
-const PORT = process.env.PORT || 3000;
+/* =================== Utils =================== */
+const $ = (sel, ctx = document) => ctx.querySelector(sel);
+const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
 
-// ================= POSTGRES =================
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// Busca el primer selector que exista
+function q(selectors, ctx = document) {
+  for (const s of selectors) {
+    const el = ctx.querySelector(s);
+    if (el) return el;
+  }
+  return null;
+}
 
-// ================= HELPERS =================
-const mapProduct = (p) => ({
-  id: p.id,
-  name: p.name,
-  price: Number(p.price),
-  title: p.name,
-  price_xaf: Number(p.price),
-  stock: p.stock ?? 0,
-  image_url: p.image_url || null,
-  active: p.active ?? true,
-  category: p.category || null,
-  store_id: p.store_id || null,
-});
+function getAuth() {
+  const token = localStorage.getItem("wap_token") || null;
+  let user = null;
+  try { user = JSON.parse(localStorage.getItem("wap_user") || "null"); } catch {}
+  return { token, user };
+}
+function setAuth(token, user) {
+  if (token) localStorage.setItem("wap_token", token);
+  if (user) localStorage.setItem("wap_user", JSON.stringify(user));
+}
+function clearAuth() {
+  localStorage.removeItem("wap_token");
+  localStorage.removeItem("wap_user");
+}
 
-const mapUser = (u) => ({
-  id: u.id,
-  email: u.email,
-  name: u.name || null,
-  phone: u.phone || null,
-  role: u.role || (u.is_admin ? "admin" : "buyer"),
-  is_admin: !!u.is_admin,
-  created_at: u.created_at,
-});
+function authHeaders(extra = {}) {
+  const { token } = getAuth();
+  const headers = { "Content-Type": "application/json", ...extra };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
 
-// === Helpers de compatibilidad (alias + parseo de precio) ===
-const getFirst = (...vals) =>
-  vals.find((v) => v !== undefined && v !== null && String(v).trim() !== "");
+async function jfetch(url, opts = {}) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  // algunos endpoints devuelven vacío (204) o texto
+  const text = await res.text();
+  try { return text ? JSON.parse(text) : {}; } catch { return {}; }
+}
 
-const parsePrice = (raw) => {
-  if (raw === undefined || raw === null) return null;
-  // Acepta números y strings tipo "2.500", "2,500", "2500 XAF"
-  const cleaned = String(raw).replace(/[^0-9]/g, "");
-  if (!cleaned) return null;
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : null;
+function moneyXAF(n) {
+  return Number(n || 0).toLocaleString() + " XAF";
+}
+
+/* =================== Carrito (guest) =================== */
+function loadCart() {
+  try { return JSON.parse(localStorage.getItem("wap_cart") || "[]"); } catch { return []; }
+}
+function saveCart(items) {
+  localStorage.setItem("wap_cart", JSON.stringify(items));
+  updateCartCount();
+}
+function clearCart() {
+  saveCart([]);
+  renderCart(); // para que se cierre si queda vacío
+}
+function addToCart(product) {
+  const items = loadCart();
+  const idx = items.findIndex(i => i.id === product.id);
+  if (idx >= 0) items[idx].qty += 1;
+  else items.push({
+    id: product.id,
+    title: product.title || product.name,
+    price_xaf: Number(product.price_xaf ?? product.price ?? 0),
+    image_url: product.image_url || null,
+    qty: 1
+  });
+  saveCart(items);
+}
+function updateCartCount() {
+  const el = q(["#cartCount", ".cart-count"]);
+  if (el) el.textContent = loadCart().reduce((s, i) => s + i.qty, 0);
+}
+function cartSubtotal() {
+  return loadCart().reduce((s, i) => s + Number(i.price_xaf || 0) * Number(i.qty || 0), 0);
+}
+
+/* =================== API client =================== */
+const api = {
+  // Auth
+  async login(email, password) {
+    return await jfetch(`${API_BASE}/auth/login`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ email, password })
+    });
+  },
+  async signup(payload) {
+    // tu backend acepta /api/auth/signup y /api/register
+    try {
+      return await jfetch(`${API_BASE}/auth/signup`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload)
+      });
+    } catch {
+      return await jfetch(`${API_BASE}/register`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload)
+      });
+    }
+  },
+  async profile() {
+    return await jfetch(`${API_BASE}/profile`, { headers: authHeaders() });
+  },
+
+  // Stores
+  async stores() {
+    // devuelve {stores:[...]}
+    try {
+      const d = await jfetch(`${API_BASE}/stores`);
+      return Array.isArray(d) ? d : (d.stores || []);
+    } catch {
+      const d = await jfetch(`${API_BASE}/businesses`);
+      return Array.isArray(d) ? d : (d.stores || []);
+    }
+  },
+
+  // Products
+  async products(params = {}) {
+    const url = new URL(`${API_BASE}/products`);
+    Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v); });
+    const d = await jfetch(url.toString());
+    return Array.isArray(d) ? d : (d.products || []);
+  },
+
+  // Orders (guest or auth)
+  async createOrder(payload) {
+    return await jfetch(`${API_BASE}/orders`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload)
+    });
+  },
+
+  // Seller
+  seller: {
+    async products() {
+      const d = await jfetch(`${API_BASE}/seller/products`, { headers: authHeaders() });
+      return Array.isArray(d) ? d : (d.products || []);
+    },
+    async createProduct(payload) {
+      return await jfetch(`${API_BASE}/seller/products`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload)
+      });
+    },
+    async orders() {
+      const d = await jfetch(`${API_BASE}/seller/orders`, { headers: authHeaders() });
+      return Array.isArray(d) ? d : (d.orders || []);
+    },
+    async setOrderStatus(orderId, status) {
+      return await jfetch(`${API_BASE}/seller/orders/${orderId}/status`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ status })
+      });
+    }
+  },
+
+  // Admin
+  admin: {
+    async users() {
+      const d = await jfetch(`${API_BASE}/admin/users`, { headers: authHeaders() });
+      return Array.isArray(d) ? d : (d.users || []);
+    },
+    async createSeller(payload) {
+      return await jfetch(`${API_BASE}/admin/create-seller`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload)
+      });
+    }
+  }
 };
 
-// ================= DB INIT + PARCHEO SEGURO =================
-async function initDb() {
-  // Tablas base (no fallan si ya existen)
-  await pool.query(`
-    -- ========= USERS =========
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      is_admin BOOLEAN DEFAULT false,
-      is_seller BOOLEAN DEFAULT false,
-      name TEXT,
-      phone TEXT,
-      role TEXT DEFAULT 'buyer',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+/* =================== Render helpers (Index) =================== */
+function renderStores(stores) {
+  const container = q(["#businessesSection", "#storesList", ".businesses"]);
+  if (!container) return;
+  container.innerHTML = "";
 
-    -- ========= STORES =========
-    CREATE TABLE IF NOT EXISTS stores (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+  const wrap = document.createElement("div");
+  wrap.className = "business-list";
 
-    -- ========= PRODUCTS =========
-    CREATE TABLE IF NOT EXISTS products (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      price NUMERIC NOT NULL,
-      seller_user_id INT REFERENCES users(id) ON DELETE SET NULL
-    );
+  const allBtn = document.createElement("button");
+  allBtn.className = "store-pill active";
+  allBtn.textContent = "Todos";
+  allBtn.dataset.storeId = "";
+  wrap.appendChild(allBtn);
 
-    -- ========= CART =========
-    CREATE TABLE IF NOT EXISTS cart (
-      id SERIAL PRIMARY KEY,
-      user_id INT REFERENCES users(id) ON DELETE CASCADE,
-      product_id INT REFERENCES products(id) ON DELETE CASCADE,
-      quantity INT NOT NULL
-    );
-
-    -- ========= ORDERS =========
-    CREATE TABLE IF NOT EXISTS orders (
-      id SERIAL PRIMARY KEY,
-      user_id INT REFERENCES users(id) ON DELETE SET NULL,
-      total NUMERIC NOT NULL,
-      status TEXT DEFAULT 'CREATED',
-      fulfillment_type TEXT DEFAULT 'pickup',
-      guest_name TEXT,
-      guest_phone TEXT,
-      address TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS order_items (
-      id SERIAL PRIMARY KEY,
-      order_id INT REFERENCES orders(id) ON DELETE CASCADE,
-      product_id INT REFERENCES products(id),
-      quantity INT NOT NULL,
-      unit_price NUMERIC
-    );
-  `);
-
-  // Columnas que podrían faltar (parche idempotente)
-  await pool.query(`
-    -- stores
-    ALTER TABLE stores
-      ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE CASCADE,
-      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
-
-    -- products
-    ALTER TABLE products
-      ADD COLUMN IF NOT EXISTS store_id INT REFERENCES stores(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS seller_id INT REFERENCES users(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS image_url TEXT,
-      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE,
-      ADD COLUMN IF NOT EXISTS category TEXT;
-
-    -- índices
-    CREATE INDEX IF NOT EXISTS idx_products_seller_id ON products(seller_id);
-    CREATE INDEX IF NOT EXISTS idx_products_store_id ON products(store_id);
-    CREATE INDEX IF NOT EXISTS idx_stores_seller_user_id ON stores(seller_user_id);
-  `);
-
-  // Migración suave: si alguna base antigua tiene stores.seller_id, copiar a seller_user_id
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'stores' AND column_name = 'seller_id'
-      ) THEN
-        UPDATE stores
-        SET seller_user_id = COALESCE(seller_user_id, seller_id)
-        WHERE seller_user_id IS NULL;
-      END IF;
-    END $$;
-  `);
-
-  // Migración suave: si productos antiguos usan seller_user_id, copiar a seller_id
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'products' AND column_name = 'seller_user_id'
-      ) THEN
-        UPDATE products
-        SET seller_id = COALESCE(seller_id, seller_user_id)
-        WHERE seller_id IS NULL;
-      END IF;
-    END $$;
-  `);
+  for (const s of stores) {
+    const pill = document.createElement("button");
+    pill.className = "store-pill";
+    pill.textContent = s.name || `Tienda ${s.id}`;
+    pill.dataset.storeId = s.id;
+    wrap.appendChild(pill);
+  }
+  container.appendChild(wrap);
 }
-initDb().catch(console.error);
 
-// ================= ADMIN POR DEFECTO =================
-async function createDefaultAdmin() {
-  const email = "admin@wapmarket.com";
-  const password = "naciel25091999"; // cámbialo luego
-  const passwordHash = await bcrypt.hash(password, 10);
+function renderProducts(list) {
+  const container = q(["#productsList", ".products-grid", "#productosGrid"]);
+  if (!container) return;
+  container.innerHTML = "";
 
-  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
-  if (result.rows.length === 0) {
-    await pool.query(
-      "INSERT INTO users (email, password_hash, is_admin, role, name) VALUES ($1, $2, $3, $4, $5)",
-      [email, passwordHash, true, "admin", "Administrador"]
-    );
-    console.log(`✅ Admin creado: ${email} / ${password}`);
-  } else {
-    console.log("⚡ Admin ya existe, no se creó otro.");
+  if (!list.length) {
+    container.innerHTML = `<div class="muted">No hay productos disponibles.</div>`;
+    return;
+  }
+
+  for (const p of list) {
+    const title = p.title || p.name || "Producto";
+    const price = Number(p.price_xaf ?? p.price ?? 0);
+    const img = p.image_url || "https://via.placeholder.com/320x210?text=Producto";
+    const card = document.createElement("div");
+    card.className = "product-card";
+    card.innerHTML = `
+      <img class="product-img" src="${img}" alt="${title}">
+      <div class="product-info">
+        <div class="product-title">${title}</div>
+        <div class="product-price">${moneyXAF(price)}</div>
+        <button class="product-btn">Añadir</button>
+      </div>
+    `;
+    $(".product-btn", card).addEventListener("click", () => {
+      addToCart({ id: p.id, title, price_xaf: price, image_url: img });
+      toast("Producto añadido al carrito");
+    });
+    container.appendChild(card);
   }
 }
-createDefaultAdmin().catch(console.error);
 
-// ================= MIDDLEWARE =================
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader) return res.status(401).json({ error: "No token provided" });
-  const token = authHeader.split(" ")[1];
+function renderCart() {
+  const drawer = q(["#cartDrawer", ".cart-drawer"]);
+  const itemsEl = q(["#cartItems", ".cart-items"]);
+  const subtotalEl = q(["#subtotalXAF", ".subtotal-xaf"]);
+  if (!itemsEl) return;
+
+  const items = loadCart();
+  itemsEl.innerHTML = "";
+
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.className = "cart-row";
+    row.innerHTML = `
+      <img class="thumb" src="${it.image_url || "https://via.placeholder.com/64"}" alt="">
+      <div class="cart-row-info">
+        <div class="title">${it.title}</div>
+        <div class="tiny">${moneyXAF(it.price_xaf)} × ${it.qty}</div>
+      </div>
+      <div class="cart-row-actions">
+        <button class="minus" aria-label="menos">−</button>
+        <span class="q">${it.qty}</span>
+        <button class="plus" aria-label="más">+</button>
+        <button class="remove" aria-label="quitar">✕</button>
+      </div>
+    `;
+    $(".minus", row).onclick = () => { it.qty = Math.max(1, it.qty - 1); saveCart(items); renderCart(); };
+    $(".plus", row).onclick = () => { it.qty += 1; saveCart(items); renderCart(); };
+    $(".remove", row).onclick = () => {
+      const left = items.filter(x => x.id !== it.id);
+      saveCart(left);
+      renderCart();
+    };
+    itemsEl.appendChild(row);
+  }
+
+  if (subtotalEl) subtotalEl.textContent = cartSubtotal().toLocaleString();
+
+  // Si se vacía el carrito → cerrar drawer y (si está) modal de checkout
+  if (!items.length) {
+    const checkoutModal = q(["#checkoutModal", ".checkout-modal"]);
+    if (drawer) drawer.classList.add("hidden");
+    if (checkoutModal) checkoutModal.classList.add("hidden");
+  }
+}
+
+function updateCheckoutSummary() {
+  const subtotal = cartSubtotal();
+  const fType = q(["#fulfillmentType"]);
+  const delivery = (fType && fType.value === "delivery") ? 2000 : 0;
+  const coSubtotal = q(["#coSubtotal", ".co-subtotal"]);
+  const coDelivery = q(["#coDelivery", ".co-delivery"]);
+  const coTotal = q(["#coTotal", ".co-total"]);
+  if (coSubtotal) coSubtotal.textContent = subtotal.toLocaleString();
+  if (coDelivery) coDelivery.textContent = delivery.toLocaleString();
+  if (coTotal) coTotal.textContent = (subtotal + delivery).toLocaleString();
+}
+
+/* =================== Toaster simple =================== */
+let toastTimer = null;
+function toast(msg) {
+  let el = $("#toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    el.style.position = "fixed";
+    el.style.left = "50%";
+    el.style.bottom = "24px";
+    el.style.transform = "translateX(-50%)";
+    el.style.padding = "10px 14px";
+    el.style.background = "rgba(0,0,0,.8)";
+    el.style.color = "#fff";
+    el.style.borderRadius = "8px";
+    el.style.fontSize = "14px";
+    el.style.zIndex = "10000";
+    el.style.opacity = "0";
+    el.style.transition = "opacity .2s ease";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.style.opacity = "0"), 1600);
+}
+
+/* =================== Bootstraps por página =================== */
+document.addEventListener("DOMContentLoaded", () => {
+  updateCartCount();
+
+  const isIndex = !!q(["#productsList", ".products-grid", "#checkoutForm"]);
+  const isLogin = !!q(["#loginForm", "#signupForm"]);
+  const isSeller = !!q(["#sellerProducts", "#sellerOrders", "#newProductForm"]);
+  const isAdmin = !!q(["#createSellerForm", "#usersTable"]);
+
+  if (isIndex) bootIndex();
+  if (isLogin) bootLogin();
+  if (isSeller) bootSeller();
+  if (isAdmin) bootAdmin();
+});
+
+/* =================== INDEX =================== */
+async function bootIndex() {
+  const productsContainer = q(["#productsList", ".products-grid"]);
+  const searchInput = q(["#searchInput"]);
+  const searchBtn = q(["#searchBtn"]);
+  const minPrice = q(["#minPriceFilter"]);
+  const maxPrice = q(["#maxPriceFilter"]);
+  const categorySel = q(["#categoryFilter"]);
+  const cartBtn = q(["#cartBtn", ".cart-btn"]);
+  const cartDrawer = q(["#cartDrawer", ".cart-drawer"]);
+  const closeCartBtn = q(["#closeCart", ".close-cart"]);
+  const checkoutOpen = q(["#checkoutOpen", ".checkout-open"]);
+  const checkoutModal = q(["#checkoutModal", ".checkout-modal"]);
+  const closeCheckout = q(["#closeCheckout", ".close-checkout"]);
+  const fulfillmentType = q(["#fulfillmentType"]);
+
+  let allProducts = [];
+  let allStores = [];
+  let selectedStoreId = "";
+
+  // Cargar stores + productos
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, isAdmin, role, isSeller? }
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+    [allStores, allProducts] = await Promise.all([api.stores(), api.products()]);
+  } catch (e) {
+    console.error(e);
   }
-}
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-    const role = req.user.role || (req.user.isAdmin ? "admin" : "buyer");
-    if (role === "admin" || roles.includes(role)) return next();
-    return res.status(403).json({ error: "Not authorized" });
-  };
-}
-// ================= MIDDLEWARE OPCIONAL =================
-function authMiddlewareOptional(req, _res, next) {
-  const authHeader = req.headers["authorization"];
-  if (authHeader) {
-    const token = authHeader.split(" ")[1];
+  renderStores(allStores);
+  renderProducts(allProducts);
+
+  // Click en tiendas (pills)
+  document.addEventListener("click", async (e) => {
+    const pill = e.target.closest(".store-pill");
+    if (!pill) return;
+    $$(".store-pill").forEach(p => p.classList.remove("active"));
+    pill.classList.add("active");
+    selectedStoreId = pill.dataset.storeId || "";
     try {
-      const decoded = jwt.verify(token, JWT_SECRET);
-      req.user = decoded;
-    } catch {
-      // Token inválido -> lo ignoramos (pedido de invitado)
+      const list = await api.products(selectedStoreId ? { store_id: selectedStoreId } : {});
+      // aplicar filtros actuales locales
+      renderProducts(applyLocalFilters(list));
+    } catch (err) {
+      console.error(err);
     }
-  }
-  next();
-}
+  });
 
+  // Filtros locales (texto, precio, categoría)
+  const applyLocalFilters = (list) => {
+    const qText = (searchInput?.value || "").toLowerCase().trim();
+    const min = Number(minPrice?.value || 0);
+    const max = Number(maxPrice?.value || 999999999);
+    const cat = (categorySel?.value || "").toLowerCase();
 
-// ================= AUTH =================
-async function handleRegister(req, res) {
-  const { email, password, name, phone, role } = req.body;
-  try {
-    const passwordHash = await bcrypt.hash(password, 10);
-    const r = await pool.query(
-      "INSERT INTO users (email, password_hash, name, phone, role) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-      [email, passwordHash, name || null, phone || null, role || "buyer"]
-    );
-    res.json({ message: "User registered", user: mapUser(r.rows[0]) });
-  } catch {
-    res.status(400).json({ error: "Email already registered" });
-  }
-}
-async function handleLogin(req, res) {
-  const { email, password } = req.body;
-  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
-  const user = result.rows[0];
-  if (!user) return res.status(400).json({ error: "User not found" });
-
-  const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) return res.status(400).json({ error: "Invalid password" });
-
-  const role = user.role || (user.is_admin ? "admin" : user.is_seller ? "seller" : "buyer");
-  const payload = {
-    id: user.id,
-    email: user.email,
-    isAdmin: user.is_admin,
-    role,
-    isSeller: user.is_seller,
-  };
-  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-  res.json({ token, user: mapUser(user) });
-}
-
-app.post("/api/register", handleRegister);
-app.post("/api/auth/signup", handleRegister);
-app.post("/api/login", handleLogin);
-app.post("/api/auth/login", handleLogin);
-
-app.get("/api/profile", authMiddleware, async (req, res) => {
-  const result = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-  res.json(mapUser(result.rows[0]));
-});
-
-// ================= STORES (NEGOCIOS) =================
-// Función común para listar stores con fallback si la columna cambia entre despliegues
-async function loadStoresRows() {
-  try {
-    const r = await pool.query(`
-      SELECT 
-        s.id, 
-        s.name, 
-        s.seller_user_id, 
-        s.active,
-        s.created_at, 
-        u.name as seller_name, 
-        u.email as seller_email,
-        COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
-      FROM stores s 
-      LEFT JOIN users u ON u.id = s.seller_user_id
-      ORDER BY s.id DESC
-    `);
-    return r.rows;
-  } catch (e) {
-    if (e && e.code === "42703") {
-      // Fallback para esquemas viejos con seller_id
-      const r2 = await pool.query(`
-        SELECT 
-          s.id, 
-          s.name, 
-          s.seller_id AS seller_user_id, 
-          s.active,
-          s.created_at, 
-          u.name as seller_name, 
-          u.email as seller_email,
-          COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
-        FROM stores s 
-        LEFT JOIN users u ON u.id = s.seller_id
-        ORDER BY s.id DESC
-      `);
-      return r2.rows;
-    }
-    throw e;
-  }
-}
-
-app.get("/api/stores", async (_req, res) => {
-  try {
-    const rows = await loadStoresRows();
-    res.json({ stores: rows });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Cannot load stores" });
-  }
-});
-
-// Aliases comunes por si el frontend usa otros paths
-app.get("/api/shops", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-app.get("/api/businesses", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-app.get("/api/negocios", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-
-// ================= PRODUCTOS =================
-app.get("/api/products", async (req, res) => {
-  const { store_id } = req.query;
-  let sql = "SELECT * FROM products";
-  const params = [];
-  if (store_id) {
-    sql += " WHERE store_id=$1";
-    params.push(store_id);
-  }
-  sql += " ORDER BY id DESC";
-  const result = await pool.query(sql, params);
-  res.json({ products: result.rows.map(mapProduct) });
-});
-
-app.get("/api/products/:id", async (req, res) => {
-  const result = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
-  if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
-  res.json(mapProduct(result.rows[0]));
-});
-
-// Admin crea/edita productos (acepta alias y parsea precio)
-app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res) => {
-  try {
-    const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
-    const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
-    const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
-    const image_url = getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null;
-    const active = req.body.active === false ? false : true;
-    const category = getFirst(req.body.category, req.body.categoria, req.body.cat) || null;
-    const store_id = req.body.store_id || null;
-    const seller_id = req.body.seller_id || null;
-
-    if (!name) return res.status(400).json({ error: "Falta el nombre del producto" });
-    if (price === null) return res.status(400).json({ error: "Falta o es inválido el precio" });
-
-    const result = await pool.query(
-      `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [name, price, stock, image_url, active, category, store_id, seller_id]
-    );
-    res.json(mapProduct(result.rows[0]));
-  } catch (err) {
-    console.error("Error admin creando producto:", err);
-    res.status(500).json({ error: "No se pudo crear el producto" });
-  }
-});
-
-app.put("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
-  // También aceptamos alias en updates
-  const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
-  const priceParsed = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
-  const stockParsed = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty));
-
-  const updates = {
-    name: name ?? null,
-    price: Number.isFinite(priceParsed) ? priceParsed : null,
-    stock: Number.isFinite(stockParsed) ? stockParsed : null,
-    image_url: getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null,
-    active: typeof req.body.active === "boolean" ? req.body.active : null,
-    category: getFirst(req.body.category, req.body.categoria, req.body.cat) || null,
-    store_id: req.body.store_id ?? null,
-    seller_id: req.body.seller_id ?? null,
+    return list.filter(p => {
+      const t = (p.title || p.name || "").toLowerCase();
+      const price = Number(p.price_xaf ?? p.price ?? 0);
+      const c = (p.category || "").toLowerCase();
+      return (!qText || t.includes(qText)) && price >= min && price <= max && (!cat || c === cat);
+    });
   };
 
-  const result = await pool.query(
-    `UPDATE products SET
-      name=COALESCE($1,name),
-      price=COALESCE($2,price),
-      stock=COALESCE($3,stock),
-      image_url=COALESCE($4,image_url),
-      active=COALESCE($5,active),
-      category=COALESCE($6,category),
-      store_id=COALESCE($7,store_id),
-      seller_id=COALESCE($8,seller_id)
-     WHERE id=$9 RETURNING *`,
-    [
-      updates.name,
-      updates.price,
-      updates.stock,
-      updates.image_url,
-      updates.active,
-      updates.category,
-      updates.store_id,
-      updates.seller_id,
-      req.params.id,
-    ]
-  );
-  res.json(mapProduct(result.rows[0]));
-});
-
-app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
-  await pool.query("DELETE FROM products WHERE id=$1", [req.params.id]);
-  res.json({ message: "Deleted" });
-});
-
-// ================= CARRITO (compat) =================
-app.get("/api/cart/:userId", async (req, res) => {
-  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
-  res.json(result.rows);
-});
-app.post("/api/cart/:userId", async (req, res) => {
-  const { productId, quantity } = req.body;
-  await pool.query("INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3)", [
-    req.params.userId,
-    productId,
-    quantity,
-  ]);
-  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
-  res.json(result.rows);
-});
-app.delete("/api/cart/:userId/:productId", async (req, res) => {
-  await pool.query("DELETE FROM cart WHERE user_id=$1 AND product_id=$2", [req.params.userId, req.params.productId]);
-  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
-  res.json(result.rows);
-});
-
-// ================= PEDIDOS (con invitado o usuario) =================
-app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
-  try {
-    const userId = req.body.userId || req.user?.id || null;
-    const itemsRaw = req.body.items || [];
-    const items = itemsRaw
-      .map((i) => ({
-        productId: i.productId || i.product_id,
-        quantity: i.quantity || i.qty,
-      }))
-      .filter((i) => i.productId && i.quantity > 0);
-
-    const fulfillment_type = req.body.fulfillment_type || "pickup";
-    const guest_name = req.body.guest_name || null;
-    const guest_phone = req.body.guest_phone || null;
-    const address = req.body.address || null;
-
-    if (!items.length) return res.status(400).json({ error: "Empty items" });
-
-    const productIds = items.map((i) => i.productId);
-    const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
-
-    let subtotal = 0;
-    for (const it of items) {
-      const p = r.rows.find((x) => x.id === it.productId);
-      if (p) subtotal += Number(p.price) * it.quantity;
-    }
-    const delivery = fulfillment_type === "delivery" ? 2000 : 0;
-    const total = subtotal + delivery;
-
-    const orderResult = await pool.query(
-      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
-    );
-    const order = orderResult.rows[0];
-
-    for (const it of items) {
-      const p = r.rows.find((x) => x.id === it.productId);
-      const unit = p ? Number(p.price) : 0;
-      await pool.query(
-        "INSERT INTO order_items (order_id, product_id, quantity, unit_price_xaf) VALUES ($1,$2,$3,$4)",
-        [order.id, it.productId, it.quantity, unit]
-    );
-
-    }
-
-    res.json({
-      success: true,
-      order_id: order.id,
-      order: {
-        id: order.id,
-        total_xaf: Number(order.total),
-        status: order.status,
-        fulfillment_type: order.fulfillment_type,
-        created_at: order.created_at,
-      },
-    });
-  } catch (err) {
-    console.error("Error creando pedido:", err);
-    res.status(500).json({ error: "No se pudo crear el pedido" });
+  function reRenderWithFilters() {
+    api.products(selectedStoreId ? { store_id: selectedStoreId } : {})
+      .then((list) => renderProducts(applyLocalFilters(list)))
+      .catch(console.error);
   }
-});
 
+  if (searchBtn) searchBtn.addEventListener("click", reRenderWithFilters);
+  if (searchInput) searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") reRenderWithFilters(); });
+  if (minPrice) minPrice.addEventListener("change", reRenderWithFilters);
+  if (maxPrice) maxPrice.addEventListener("change", reRenderWithFilters);
+  if (categorySel) categorySel.addEventListener("change", reRenderWithFilters);
 
-// ================= ADMIN =================
-app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
-  const r = await pool.query("SELECT * FROM users ORDER BY id DESC");
-  res.json({ users: r.rows.map(mapUser) });
-});
+  // Drawer carrito — abrir/cerrar
+  if (cartBtn) cartBtn.onclick = () => { renderCart(); cartDrawer?.classList.remove("hidden"); };
+  if (closeCartBtn) closeCartBtn.onclick = () => cartDrawer?.classList.add("hidden");
 
-app.post("/api/admin/create-seller", authMiddleware, requireRole("admin"), async (req, res) => {
-  const { name, email, password, phone, store_name } = req.body;
-  if (!email || !password || !name) return res.status(400).json({ error: "Faltan campos" });
-  const passwordHash = await bcrypt.hash(password, 10);
-  try {
-    const u = await pool.query(
-      "INSERT INTO users (email, password_hash, name, phone, role, is_admin, is_seller) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [email, passwordHash, name, phone || null, "seller", false, true]
-    );
-    const sellerId = u.rows[0].id;
-    const s = await pool.query(
-      "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING *",
-      [store_name || `${name}'s Store`, sellerId]
-    );
-    res.json({ seller_user_id: sellerId, store_id: s.rows[0].id });
-  } catch (e) {
-    res.status(400).json({ error: "No se pudo crear el vendedor (email duplicado?)" });
-  }
-});
-
-// ================= SELLER =================
-app.get("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
-  const r = await pool.query("SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC", [req.user.id]);
-  res.json({ products: r.rows.map(mapProduct) });
-});
-
-// Vendedor crea producto (acepta alias, parsea precio y autocrea tienda si falta)
-app.post("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
-  try {
-    // Alias del frontend y parseo robusto
-    const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
-    const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
-    const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
-    const image_url = getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null;
-    const active = req.body.active === false ? false : true;
-    const category = getFirst(req.body.category, req.body.categoria, req.body.cat) || null;
-
-    if (!name) return res.status(400).json({ error: "Falta el nombre del producto" });
-    if (price === null) return res.status(400).json({ error: "Falta o es inválido el precio" });
-
-    // buscar / crear la store del vendedor
-    let storeR = await pool.query("SELECT id FROM stores WHERE seller_user_id=$1 LIMIT 1", [req.user.id]);
-    if (storeR.rows.length === 0) {
-      const userR = await pool.query("SELECT name, email FROM users WHERE id=$1", [req.user.id]);
-      const baseName = userR.rows[0]?.name || userR.rows[0]?.email || "Mi Tienda";
-      storeR = await pool.query(
-        "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING id",
-        [baseName, req.user.id]
-      );
+  // Cerrar carrito al clicar fuera
+  document.addEventListener("click", (e) => {
+    if (!cartDrawer || cartDrawer.classList.contains("hidden")) return;
+    const panel = cartDrawer.querySelector(".drawer-panel") || cartDrawer.firstElementChild;
+    if (!panel) return;
+    const clickedInside = panel.contains(e.target);
+    const clickedButton = e.target.closest("#cartBtn,.cart-btn");
+    if (!clickedInside && !clickedButton) {
+      cartDrawer.classList.add("hidden");
     }
-    const storeId = storeR.rows[0].id;
+  });
+  // Escape cierra drawer
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") cartDrawer?.classList.add("hidden");
+  });
 
-    const r = await pool.query(
-      `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [name, price, stock, image_url, active, category, storeId, req.user.id]
-    );
+  // Checkout modal
+  if (checkoutOpen) checkoutOpen.onclick = () => { renderCart(); checkoutModal?.classList.remove("hidden"); updateCheckoutSummary(); };
+  if (closeCheckout) closeCheckout.onclick = () => checkoutModal?.classList.add("hidden");
+  if (fulfillmentType) fulfillmentType.onchange = updateCheckoutSummary;
 
-    res.json({ product: mapProduct(r.rows[0]) });
-  } catch (err) {
-    console.error("Error creando producto:", err);
-    res.status(500).json({ error: "No se pudo crear el producto" });
-  }
-});
+  // Cerrar checkout al clicar fuera
+  document.addEventListener("click", (e) => {
+    if (!checkoutModal || checkoutModal.classList.contains("hidden")) return;
+    const panel = checkoutModal.querySelector(".modal-panel") || checkoutModal.firstElementChild;
+    if (!panel) return;
+    const inside = panel.contains(e.target);
+    const openBtn = e.target.closest("#checkoutOpen,.checkout-open");
+    if (!inside && !openBtn) {
+      checkoutModal.classList.add("hidden");
+    }
+  });
 
-app.get("/api/seller/orders", authMiddleware, requireRole("seller"), async (req, res) => {
-  const r = await pool.query(
-    `
-    SELECT DISTINCT o.*
-    FROM orders o
-    JOIN order_items oi ON oi.order_id = o.id
-    JOIN products p ON p.id = oi.product_id
-    WHERE p.seller_id = $1
-    ORDER BY o.id DESC
-  `,
-    [req.user.id]
-  );
+  // Submit checkout
+  const checkoutForm = q(["#checkoutForm"]);
+  if (checkoutForm) {
+    checkoutForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const items = loadCart();
+      if (!items.length) { alert("Tu carrito está vacío"); return; }
 
-  const orders = [];
-  for (const o of r.rows) {
-    const itemsR = await pool.query(
-      `
-      SELECT oi.product_id, oi.quantity, oi.unit_price, p.name
-      FROM order_items oi
-      JOIN products p ON p.id = oi.product_id
-      WHERE oi.order_id=$1 AND p.seller_id=$2
-    `,
-      [o.id, req.user.id]
-    );
-    const items = itemsR.rows.map((it) => ({
-      product_id: it.product_id,
-      title: it.name,
-      qty: it.quantity,
-      unit_price_xaf: Number(it.unit_price),
-    }));
-    const subtotal = items.reduce((s, i) => s + i.unit_price_xaf * i.qty, 0);
-    orders.push({
-      id: o.id,
-      created_at: o.created_at,
-      guest_name: o.guest_name,
-      guest_phone: o.guest_phone,
-      address: o.address,
-      fulfillment_type: o.fulfillment_type,
-      status: o.status,
-      subtotal_xaf: subtotal,
-      total_xaf: Number(o.total),
-      items,
+      const fd = new FormData(checkoutForm);
+      const payload = {
+        items: items.map(i => ({ product_id: i.id, quantity: i.qty })),
+        fulfillment_type: fd.get("fulfillment_type") || "pickup",
+        address: fd.get("address") || null,
+        guest_name: fd.get("guest_name") || null,
+        guest_phone: fd.get("guest_phone") || null
+      };
+
+      try {
+        const res = await api.createOrder(payload);
+        // mini-factura basada en el carrito local + datos del backend (id, total, estado)
+        showInvoice({
+          order_id: res?.order_id || res?.order?.id,
+          status: res?.order?.status || "CREATED",
+          fulfillment_type: res?.order?.fulfillment_type || payload.fulfillment_type,
+          created_at: res?.order?.created_at || new Date().toISOString(),
+          items,
+          delivery_fee: payload.fulfillment_type === "delivery" ? 2000 : 0,
+          total_xaf: res?.order?.total_xaf ?? (cartSubtotal() + (payload.fulfillment_type === "delivery" ? 2000 : 0))
+        });
+        clearCart();
+        checkoutForm.reset();
+      } catch (err) {
+        console.error(err);
+        alert("No se pudo completar el pedido.");
+      }
     });
   }
-  res.json({ orders });
+}
+
+/* =================== Mini-Factura =================== */
+function showInvoice({ order_id, status, fulfillment_type, created_at, items, delivery_fee, total_xaf }) {
+  let modal = $("#invoiceModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "invoiceModal";
+    modal.className = "invoice-modal";
+    modal.innerHTML = `
+      <div class="invoice-panel">
+        <div class="invoice-header">
+          <h3>Factura</h3>
+          <button id="closeInvoice" aria-label="cerrar">✕</button>
+        </div>
+        <div class="invoice-body"></div>
+        <div class="invoice-footer">
+          <button id="printInvoice">Imprimir</button>
+          <button id="okInvoice">Aceptar</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    $("#closeInvoice").onclick = () => modal.classList.add("hidden");
+    $("#okInvoice").onclick = () => modal.classList.add("hidden");
+    $("#printInvoice").onclick = () => window.print();
+    // cerrar clic fuera
+    modal.addEventListener("click", (e) => {
+      const panel = modal.querySelector(".invoice-panel");
+      if (panel && !panel.contains(e.target)) modal.classList.add("hidden");
+    });
+  }
+
+  const body = modal.querySelector(".invoice-body");
+  const rows = items.map(i => `
+    <tr>
+      <td>${i.title}</td>
+      <td style="text-align:center">${i.qty}</td>
+      <td style="text-align:right">${moneyXAF(i.price_xaf)}</td>
+      <td style="text-align:right">${moneyXAF(i.price_xaf * i.qty)}</td>
+    </tr>
+  `).join("");
+
+  const subtotal = items.reduce((s, i) => s + i.price_xaf * i.qty, 0);
+  body.innerHTML = `
+    <div class="invoice-meta">
+      <div><strong>Pedido:</strong> ${order_id ?? "-"}</div>
+      <div><strong>Fecha:</strong> ${new Date(created_at).toLocaleString()}</div>
+      <div><strong>Estado:</strong> ${status}</div>
+      <div><strong>Modo:</strong> ${fulfillment_type}</div>
+    </div>
+    <table class="invoice-table">
+      <thead><tr><th>Producto</th><th>Cant.</th><th>Precio</th><th>Total</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot>
+        <tr><td colspan="3" style="text-align:right">Subtotal</td><td style="text-align:right">${moneyXAF(subtotal)}</td></tr>
+        <tr><td colspan="3" style="text-align:right">Envío</td><td style="text-align:right">${moneyXAF(delivery_fee || 0)}</td></tr>
+        <tr><td colspan="3" style="text-align:right"><strong>Total</strong></td><td style="text-align:right"><strong>${moneyXAF(total_xaf)}</strong></td></tr>
+      </tfoot>
+    </table>
+  `;
+
+  modal.classList.remove("hidden");
+}
+
+/* =================== LOGIN / SIGNUP =================== */
+function bootLogin() {
+  const loginForm = $("#loginForm");
+  const signupForm = $("#signupForm");
+
+  if (loginForm) {
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(loginForm);
+      const email = fd.get("email");
+      const password = fd.get("password");
+      try {
+        const data = await api.login(email, password);
+        if (data?.token) setAuth(data.token, data.user);
+        const role = data?.user?.role || (data?.user?.is_admin ? "admin" : "buyer");
+        routeByRole(role);
+      } catch (err) {
+        console.error(err);
+        alert("Credenciales inválidas");
+      }
+    });
+  }
+
+  if (signupForm) {
+    signupForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(signupForm);
+      const payload = {
+        name: fd.get("name"),
+        email: fd.get("email"),
+        phone: fd.get("phone"),
+        password: fd.get("password"),
+        role: "buyer"
+      };
+      try {
+        const data = await api.signup(payload);
+        // algunos endpoints de signup no devuelven token: refrescamos login
+        if (data?.token) setAuth(data.token, data.user);
+        else toast("Cuenta creada, inicia sesión");
+        // si quieres auto-login aquí, llama a api.login(payload.email, payload.password)
+        window.location.href = "login.html";
+      } catch (err) {
+        console.error(err);
+        alert("No se pudo crear la cuenta");
+      }
+    });
+  }
+}
+
+function routeByRole(role) {
+  if (role === "seller") window.location.href = "seller.html";
+  else if (role === "admin") window.location.href = "admin.html";
+  else window.location.href = "index.html";
+}
+
+/* =================== SELLER =================== */
+async function bootSeller() {
+  const productsGrid = $("#sellerProducts");
+  const ordersBox = $("#sellerOrders");
+  const form = $("#newProductForm");
+
+  async function refreshProducts() {
+    try {
+      const list = await api.seller.products();
+      productsGrid.innerHTML = "";
+      if (!list.length) {
+        productsGrid.innerHTML = `<div class="muted">Aún no tienes productos.</div>`;
+        return;
+      }
+      for (const p of list) {
+        const title = p.title || p.name || "Producto";
+        const price = Number(p.price_xaf ?? p.price ?? 0);
+        const img = p.image_url || "https://via.placeholder.com/320x210?text=Producto";
+        const card = document.createElement("div");
+        card.className = "product";
+        card.innerHTML = `
+          <img src="${img}" alt="${title}">
+          <div class="title">${title}</div>
+          <div class="price">${moneyXAF(price)}</div>
+        `;
+        productsGrid.appendChild(card);
+      }
+    } catch (e) {
+      console.error(e);
+      productsGrid.innerHTML = `<div class="error">Error cargando tus productos</div>`;
+    }
+  }
+
+  async function refreshOrders() {
+    try {
+      const list = await api.seller.orders();
+      ordersBox.innerHTML = "";
+      if (!list.length) {
+        ordersBox.innerHTML = `<div class="muted">Sin pedidos por ahora.</div>`;
+        return;
+      }
+      const tbl = document.createElement("table");
+      tbl.className = "orders-table";
+      tbl.innerHTML = `
+        <thead>
+          <tr>
+            <th>ID</th><th>Fecha</th><th>Cliente</th><th>Tipo</th><th>Estado</th><th>Items</th><th>Total</th><th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+      for (const o of list) {
+        const tr = document.createElement("tr");
+        const when = o.created_at ? new Date(o.created_at).toLocaleString() : "";
+        const buyer = o.guest_name || o.customer_name || "";
+        const itemsTxt = (o.items || []).map(i => `${i.title || i.name} × ${i.qty || i.quantity}`).join(", ");
+        tr.innerHTML = `
+          <td>${o.id}</td>
+          <td>${when}</td>
+          <td>${buyer}</td>
+          <td>${o.fulfillment_type || ""}</td>
+          <td><span class="badge">${o.status}</span></td>
+          <td>${itemsTxt}</td>
+          <td>${moneyXAF(o.total_xaf || o.total)}</td>
+          <td class="actions">
+            <button class="btn tiny ready">Ready to Pick up</button>
+            <button class="btn tiny delivered">Delivered</button>
+            <button class="btn tiny cancel">Cancel</button>
+          </td>
+        `;
+        $(".ready", tr).onclick = async () => { await setStatus(o.id, "READY_TO_PICKUP"); };
+        $(".delivered", tr).onclick = async () => { await setStatus(o.id, "DELIVERED"); };
+        $(".cancel", tr).onclick = async () => { await setStatus(o.id, "CANCELLED"); };
+        $("tbody", tbl).appendChild(tr);
+      }
+      ordersBox.appendChild(tbl);
+    } catch (e) {
+      console.error(e);
+      ordersBox.innerHTML = `<div class="error">Error cargando pedidos</div>`;
+    }
+  }
+
+  async function setStatus(orderId, status) {
+    try {
+      await api.seller.setOrderStatus(orderId, status);
+      toast("Estado actualizado");
+      await refreshOrders();
+    } catch (e) {
+      console.error(e);
+      alert("No se pudo actualizar el estado");
+    }
+  }
+
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const payload = {
+        title: fd.get("title") || fd.get("name"),
+        price_xaf: fd.get("price_xaf") || fd.get("price"),
+        stock: fd.get("stock") || fd.get("quantity") || 0,
+        image_url: fd.get("image_url") || fd.get("image") || null,
+        category: fd.get("category") || null,
+        active: true
+      };
+      try {
+        await api.seller.createProduct(payload);
+        toast("Producto creado");
+        form.reset();
+        await refreshProducts();
+      } catch (e1) {
+        console.error(e1);
+        alert("No se pudo crear el producto");
+      }
+    });
+  }
+
+  await refreshProducts();
+  await refreshOrders();
+}
+
+/* =================== ADMIN =================== */
+function bootAdmin() {
+  const form = $("#createSellerForm");
+  const usersWrap = $("#usersTable");
+  const refreshBtn = $("#refreshUsers");
+
+  async function renderUsers() {
+    usersWrap.innerHTML = "Cargando...";
+    try {
+      const list = await api.admin.users();
+      const tbl = document.createElement("table");
+      tbl.className = "users-table";
+      tbl.innerHTML = `
+        <thead><tr><th>Nombre</th><th>Email</th><th>Rol</th><th>Tienda</th></tr></thead>
+        <tbody></tbody>
+      `;
+      for (const u of list) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${u.name || ""}</td>
+          <td>${u.email || ""}</td>
+          <td>${u.role || (u.is_admin ? "admin" : "buyer")}</td>
+          <td>${u.store?.name || u.store_name || ""}</td>
+        `;
+        $("tbody", tbl).appendChild(tr);
+      }
+      usersWrap.innerHTML = "";
+      usersWrap.appendChild(tbl);
+    } catch (e) {
+      console.error(e);
+      usersWrap.innerHTML = `<div class="error">No se pudieron cargar los usuarios</div>`;
+    }
+  }
+
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const payload = {
+        name: fd.get("name"),
+        email: fd.get("email"),
+        password: fd.get("password"),
+        phone: fd.get("phone"),
+        store_name: fd.get("store_name"),
+        city: fd.get("city"),
+        description: fd.get("description")
+      };
+      try {
+        await api.admin.createSeller(payload);
+        toast("Vendedor creado");
+        form.reset();
+        renderUsers();
+      } catch (e1) {
+        console.error(e1);
+        alert("No se pudo crear el vendedor");
+      }
+    });
+  }
+
+  if (refreshBtn) refreshBtn.onclick = renderUsers;
+  renderUsers();
+}
+
+/* =================== (Opcional) Logout botón genérico =================== */
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-logout]");
+  if (!btn) return;
+  e.preventDefault();
+  clearAuth();
+  window.location.href = "index.html";
 });
-
-app.put("/api/seller/orders/:id/status", authMiddleware, requireRole("seller"), async (req, res) => {
-  const { status } = req.body;
-  const authR = await pool.query(
-    `
-    SELECT 1
-    FROM order_items oi JOIN products p ON p.id = oi.product_id
-    WHERE oi.order_id=$1 AND p.seller_id=$2
-    LIMIT 1
-  `,
-    [req.params.id, req.user.id]
-  );
-  if (authR.rows.length === 0) return res.status(403).json({ error: "No autorizado" });
-
-  await pool.query("UPDATE orders SET status=$1 WHERE id=$2", [status, req.params.id]);
-  res.json({ message: "Estado actualizado" });
-});
-
-// ================= START =================
-app.get("/", (_req, res) => res.send("✅ API WapMarket funcionando"));
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
