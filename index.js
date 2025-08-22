@@ -117,6 +117,34 @@ async function initDb() {
       unit_price NUMERIC
     );
   `);
+    // ========= ORDERS: parcheo columnas que podrían faltar =========
+  await pool.query(`
+    ALTER TABLE orders
+      ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS total NUMERIC DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'CREATED',
+      ADD COLUMN IF NOT EXISTS fulfillment_type TEXT DEFAULT 'pickup',
+      ADD COLUMN IF NOT EXISTS guest_name TEXT,
+      ADD COLUMN IF NOT EXISTS guest_phone TEXT,
+      ADD COLUMN IF NOT EXISTS address TEXT,
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  `);
+
+  -- migración suave si existía una columna antigua
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'orders' AND column_name = 'buyer_user_id'
+      ) THEN
+        UPDATE orders
+        SET user_id = COALESCE(user_id, buyer_user_id)
+        WHERE user_id IS NULL;
+      END IF;
+    END $$;
+  `);
+
 
   // Columnas que podrían faltar (parche idempotente)
   await pool.query(`
