@@ -1,678 +1,651 @@
-// Backend Express + PostgreSQL extendido (compat con tu frontend actual)
-const express = require("express");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
+/* =========================
+   WapMarket — Frontend glue
+   ========================= */
 
-const app = express();
-app.use(express.json());
-app.use(cors());
+// ==== Ajusta tu backend aquí ====
+const API_BASE = "https://backend-wapmarket-production.up.railway.app/api";
 
-// ================= CONFIG =================
-const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
-const PORT = process.env.PORT || 3000;
+// ==== Utilidades básicas ====
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const toJSON = (r) => (r.ok ? r.json() : r.json().then(e => Promise.reject(e)));
+const money = (n) => new Intl.NumberFormat("es-GQ").format(Number(n || 0));
+const ls = {
+  get: (k, d = null) => {
+    try { return JSON.parse(localStorage.getItem(k)); } catch { return d; }
+  },
+  set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
+  del: (k) => localStorage.removeItem(k),
+};
+const AUTH_USER_KEY = "wap_user";
+const AUTH_TOKEN_KEY = "wap_token";
+const CART_KEY = "wap_cart";
+const CART_STORE_KEY = "wap_cart_store_id";
+const SELECTED_STORE_KEY = "wap_selected_store";
 
-// ================= POSTGRES =================
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// ==== Sesión ====
+function getSession() {
+  return {
+    user: ls.get(AUTH_USER_KEY),
+    token: ls.get(AUTH_TOKEN_KEY),
+  };
+}
+function setSession(token, user) {
+  ls.set(AUTH_TOKEN_KEY, token);
+  ls.set(AUTH_USER_KEY, user);
+  updateTopbar();
+}
+function clearSession() {
+  ls.del(AUTH_TOKEN_KEY);
+  ls.del(AUTH_USER_KEY);
+  // Limpio carrito al cerrar sesión por coherencia
+  clearCart(true);
+  updateTopbar();
+}
+function authHeaders(h = {}) {
+  const { token } = getSession();
+  return token ? { ...h, Authorization: `Bearer ${token}` } : h;
+}
+function api(path, opts = {}) {
+  const headers = authHeaders({ "Content-Type": "application/json", ...(opts.headers || {}) });
+  return fetch(`${API_BASE}${path}`, { ...opts, headers }).then(toJSON);
+}
 
-// ================= HELPERS =================
-const mapProduct = (p) => ({
-  id: p.id,
-  name: p.name,
-  price: Number(p.price),
-  title: p.name,
-  price_xaf: Number(p.price),
-  stock: p.stock ?? 0,
-  image_url: p.image_url || null,
-  active: p.active ?? true,
-  category: p.category || null,
-  store_id: p.store_id || null,
-});
+// ==== Topbar: saludo dinámico + logout ====
+// Index trae <a href="login.html">Entrar</a> y botón carrito (#cartBtn) en la nav.  :contentReference[oaicite:5]{index=5}
+function updateTopbar() {
+  const nav = $(".topbar .nav");
+  if (!nav) return;
 
-const mapUser = (u) => ({
-  id: u.id,
-  email: u.email,
-  name: u.name || null,
-  phone: u.phone || null,
-  role: u.role || (u.is_admin ? "admin" : "buyer"),
-  is_admin: !!u.is_admin,
-  created_at: u.created_at,
-});
+  const { user } = getSession();
 
-// === Helpers de compatibilidad (alias + parseo de precio) ===
-const getFirst = (...vals) =>
-  vals.find((v) => v !== undefined && v !== null && String(v).trim() !== "");
+  // Conserva botón carrito si existe
+  const cartBtn = $("#cartBtn")?.outerHTML || "";
 
-const parsePrice = (raw) => {
-  if (raw === undefined || raw === null) return null;
-  // Acepta números y strings tipo "2.500", "2,500", "2500 XAF"
-  const cleaned = String(raw).replace(/[^0-9]/g, "");
-  if (!cleaned) return null;
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : null;
+  if (user) {
+    const name = user.name || user.email;
+    const role = user.role || (user.is_admin ? "admin" : "buyer");
+
+    let roleLink = "";
+    if (role === "seller") roleLink = `<a href="seller.html" title="Panel de vendedor">Vendedor</a>`;
+    if (role === "admin") roleLink = `<a href="admin.html" title="Panel de administrador">Admin</a>`;
+
+    nav.innerHTML = `
+      <span>Hola, <strong>${name}</strong></span>
+      ${roleLink}
+      ${cartBtn}
+      <button id="logoutBtn" title="Cerrar sesión">Salir</button>
+    `;
+
+    $("#logoutBtn")?.addEventListener("click", () => {
+      clearSession();
+      // tras logout, vuelvo a home
+      if (!location.pathname.endsWith("index.html")) {
+        location.href = "index.html";
+      } else {
+        // refresco la UI de index si ya estoy aquí
+        refreshCartBadge();
+      }
+    });
+  } else {
+    // Si no hay sesión, vuelve a poner "Entrar" + carrito si estaba
+    nav.innerHTML = `
+      <a href="login.html">Entrar</a>
+      ${cartBtn}
+    `;
+  }
+}
+
+// ==== Carrito (ligado a tienda seleccionada) ====
+function loadCart() {
+  return {
+    items: ls.get(CART_KEY, []),          // [{id, title, price_xaf, qty, image_url}]
+    storeId: ls.get(CART_STORE_KEY, null) // id de la tienda asociada a estos items
+  };
+}
+function saveCart(cart) {
+  ls.set(CART_KEY, cart.items);
+  ls.set(CART_STORE_KEY, cart.storeId);
+  refreshCartBadge();
+  renderCartDrawer(); // si está abierto, actualiza
+}
+function clearCart(keepStore = false) {
+  const storeId = keepStore ? ls.get(CART_STORE_KEY, null) : null;
+  saveCart({ items: [], storeId });
+}
+function resetCartForStore(newStoreId) {
+  const currentStoreId = ls.get(CART_STORE_KEY, null);
+  if (currentStoreId !== newStoreId) {
+    saveCart({ items: [], storeId: newStoreId });
+  }
+}
+function addToCart(product, qty = 1) {
+  const cart = loadCart();
+  if (cart.storeId == null) {
+    // Primera vez: liga carrito a la tienda del producto
+    cart.storeId = product.store_id ?? ls.get(SELECTED_STORE_KEY, null);
+  }
+  // Seguridad: si el producto pertenece a otra tienda, resetea
+  if (cart.storeId !== (product.store_id ?? ls.get(SELECTED_STORE_KEY, null))) {
+    saveCart({ items: [], storeId: product.store_id ?? ls.get(SELECTED_STORE_KEY, null) });
+  }
+
+  const idx = cart.items.findIndex(i => i.id === product.id);
+  if (idx >= 0) {
+    cart.items[idx].qty += qty;
+  } else {
+    cart.items.push({
+      id: product.id,
+      title: product.name || product.title,
+      price_xaf: Number(product.price_xaf ?? product.price ?? 0),
+      qty,
+      image_url: product.image_url || null,
+      store_id: product.store_id ?? null
+    });
+  }
+  saveCart(cart);
+}
+function removeFromCart(productId) {
+  const cart = loadCart();
+  cart.items = cart.items.filter(i => i.id !== productId);
+  saveCart(cart);
+}
+function refreshCartBadge() {
+  const count = loadCart().items.reduce((s, i) => s + i.qty, 0);
+  const badge = $("#cartCount");
+  if (badge) badge.textContent = count;
+}
+
+// ==== Drawer del carrito + checkout (index) ====
+function initCartUI() {
+  const cartBtn = $("#cartBtn");
+  const drawer = $("#cartDrawer");
+  const closeCart = $("#closeCart");
+  const checkoutOpen = $("#checkoutOpen");
+  const closeCheckout = $("#closeCheckout");
+  const checkoutModal = $("#checkoutModal");
+  const checkoutForm = $("#checkoutForm");
+  const fulfillmentType = $("#fulfillmentType");
+  const coSubtotal = $("#coSubtotal");
+  const coDelivery = $("#coDelivery");
+  const coTotal = $("#coTotal");
+
+  if (cartBtn && drawer) {
+    cartBtn.addEventListener("click", () => drawer.classList.remove("hidden"));
+  }
+  if (closeCart && drawer) {
+    closeCart.addEventListener("click", () => drawer.classList.add("hidden"));
+  }
+  if (checkoutOpen && checkoutModal) {
+    checkoutOpen.addEventListener("click", () => {
+      drawer.classList.add("hidden");
+      checkoutModal.classList.remove("hidden");
+      // precalcula totales
+      updateCheckoutTotals();
+    });
+  }
+  if (closeCheckout && checkoutModal) {
+    closeCheckout.addEventListener("click", () => checkoutModal.classList.add("hidden"));
+  }
+  function updateCheckoutTotals() {
+    const cart = loadCart();
+    const subtotal = cart.items.reduce((s, i) => s + (i.price_xaf * i.qty), 0);
+    const delivery = fulfillmentType?.value === "delivery" ? 2000 : 0;
+    if (coSubtotal) coSubtotal.textContent = money(subtotal);
+    if (coDelivery) coDelivery.textContent = money(delivery);
+    if (coTotal) coTotal.textContent = money(subtotal + delivery);
+  }
+  fulfillmentType?.addEventListener("change", updateCheckoutTotals);
+
+  checkoutForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const cart = loadCart();
+    if (!cart.items.length) {
+      alert("Tu carrito está vacío.");
+      return;
+    }
+    const fd = new FormData(checkoutForm);
+    const payload = {
+      items: cart.items.map(i => ({ productId: i.id, quantity: i.qty })),
+      fulfillment_type: fd.get("fulfillment_type") || "pickup",
+      guest_name: fd.get("guest_name") || null,
+      guest_phone: fd.get("guest_phone") || null,
+      address: fd.get("address") || null,
+    };
+    try {
+      const res = await api("/orders", { method: "POST", body: JSON.stringify(payload) });
+      alert(`✅ Pedido creado (ID ${res.order_id}). ¡Gracias!`);
+      clearCart(true); // mantiene store seleccionada
+      $("#checkoutModal")?.classList.add("hidden");
+    } catch (err) {
+      console.error(err);
+      alert(err?.error || "No se pudo crear el pedido");
+    }
+  });
+
+  renderCartDrawer();
+  refreshCartBadge();
+}
+function renderCartDrawer() {
+  const container = $("#cartItems");
+  const subtotalEl = $("#subtotalXAF");
+  if (!container) return;
+  const cart = loadCart();
+  container.innerHTML = "";
+  let subtotal = 0;
+
+  cart.items.forEach(item => {
+    subtotal += item.price_xaf * item.qty;
+    const row = document.createElement("div");
+    row.className = "cart-row";
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.justifyContent = "space-between";
+    row.style.gap = ".5rem";
+    row.style.padding = ".4rem 0";
+    row.innerHTML = `
+      <div style="display:flex;align-items:center;gap:.5rem;max-width:70%">
+        <img src="${item.image_url || "https://via.placeholder.com/60x60?text=%20"}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:.35rem;background:#eee">
+        <div style="overflow:hidden">
+          <div style="font-weight:600;white-space:nowrap;text-overflow:ellipsis;overflow:hidden">${item.title}</div>
+          <div style="font-size:.9rem;color:#555">${money(item.price_xaf)} XAF</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:.35rem">
+        <button data-act="dec" data-id="${item.id}">−</button>
+        <span>${item.qty}</span>
+        <button data-act="inc" data-id="${item.id}">+</button>
+        <button data-act="del" data-id="${item.id}" title="Quitar">✕</button>
+      </div>
+    `;
+    container.appendChild(row);
+  });
+
+  container.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const id = Number(btn.getAttribute("data-id"));
+    const act = btn.getAttribute("data-act");
+    const cart = loadCart();
+    const idx = cart.items.findIndex(i => i.id === id);
+    if (idx < 0) return;
+    if (act === "inc") cart.items[idx].qty += 1;
+    if (act === "dec") cart.items[idx].qty = Math.max(1, cart.items[idx].qty - 1);
+    if (act === "del") cart.items.splice(idx, 1);
+    saveCart(cart);
+  }, { once: true }); // re-engancha en cada render
+
+  if (subtotalEl) subtotalEl.textContent = money(subtotal);
+}
+
+// ==== Index: tiendas + productos (solo de la tienda seleccionada) ====
+let STATE = {
+  stores: [],
+  selectedStoreId: null,
+  allProducts: [], // productos de la tienda seleccionada
+  filters: {
+    q: "",
+    category: "",
+    min: 0,
+    max: 100000
+  }
 };
 
-// ================= DB INIT + PARCHEO SEGURO =================
-async function initDb() {
-  // Tablas base (no fallan si ya existen)
-  await pool.query(`
-    -- ========= USERS =========
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      is_admin BOOLEAN DEFAULT false,
-      is_seller BOOLEAN DEFAULT false,
-      name TEXT,
-      phone TEXT,
-      role TEXT DEFAULT 'buyer',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- ========= STORES =========
-    CREATE TABLE IF NOT EXISTS stores (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- ========= PRODUCTS =========
-    CREATE TABLE IF NOT EXISTS products (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      price NUMERIC NOT NULL,
-      seller_user_id INT REFERENCES users(id) ON DELETE SET NULL
-    );
-
-    -- ========= CART =========
-    CREATE TABLE IF NOT EXISTS cart (
-      id SERIAL PRIMARY KEY,
-      user_id INT REFERENCES users(id) ON DELETE CASCADE,
-      product_id INT REFERENCES products(id) ON DELETE CASCADE,
-      quantity INT NOT NULL
-    );
-
-    -- ========= ORDERS =========
-    CREATE TABLE IF NOT EXISTS orders (
-      id SERIAL PRIMARY KEY,
-      user_id INT REFERENCES users(id) ON DELETE SET NULL,
-      total NUMERIC NOT NULL,
-      status TEXT DEFAULT 'CREATED',
-      fulfillment_type TEXT DEFAULT 'pickup',
-      guest_name TEXT,
-      guest_phone TEXT,
-      address TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS order_items (
-      id SERIAL PRIMARY KEY,
-      order_id INT REFERENCES orders(id) ON DELETE CASCADE,
-      product_id INT REFERENCES products(id),
-      quantity INT NOT NULL,
-      unit_price NUMERIC
-    );
-  `);
-
-  // Columnas que podrían faltar (parche idempotente)
-  await pool.query(`
-    -- stores
-    ALTER TABLE stores
-      ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE CASCADE,
-      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
-
-    -- products
-    ALTER TABLE products
-      ADD COLUMN IF NOT EXISTS store_id INT REFERENCES stores(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS seller_id INT REFERENCES users(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS image_url TEXT,
-      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE,
-      ADD COLUMN IF NOT EXISTS category TEXT;
-
-    -- índices
-    CREATE INDEX IF NOT EXISTS idx_products_seller_id ON products(seller_id);
-    CREATE INDEX IF NOT EXISTS idx_products_store_id ON products(store_id);
-    CREATE INDEX IF NOT EXISTS idx_stores_seller_user_id ON stores(seller_user_id);
-  `);
-
-  // Migración suave: si alguna base antigua tiene stores.seller_id, copiar a seller_user_id
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'stores' AND column_name = 'seller_id'
-      ) THEN
-        UPDATE stores
-        SET seller_user_id = COALESCE(seller_user_id, seller_id)
-        WHERE seller_user_id IS NULL;
-      END IF;
-    END $$;
-  `);
-
-  // Migración suave: si productos antiguos usan seller_user_id, copiar a seller_id
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'products' AND column_name = 'seller_user_id'
-      ) THEN
-        UPDATE products
-        SET seller_id = COALESCE(seller_id, seller_user_id)
-        WHERE seller_id IS NULL;
-      END IF;
-    END $$;
-  `);
+async function loadStores() {
+  const r = await api("/stores"); // devuelve { stores: [...] }
+  STATE.stores = r.stores || [];
+  renderStores();
+  // Selección inicial: la última elegida o la primera disponible
+  const saved = ls.get(SELECTED_STORE_KEY, null);
+  const initial = STATE.stores.find(s => s.id === saved) ? saved : STATE.stores[0]?.id ?? null;
+  if (initial) await selectStore(initial);
 }
-initDb().catch(console.error);
 
-// ================= ADMIN POR DEFECTO =================
-async function createDefaultAdmin() {
-  const email = "admin@wapmarket.com";
-  const password = "naciel25091999"; // cámbialo luego
-  const passwordHash = await bcrypt.hash(password, 10);
+// La columna izquierda está vacía en tu HTML; la lleno con título, buscador y lista.  :contentReference[oaicite:6]{index=6}
+function renderStores() {
+  const host = $("#businessesSection");
+  if (!host) return;
+  host.innerHTML = `
+    <h3>Negocios</h3>
+    <div class="business-search">
+      <input id="storeSearch" placeholder="Buscar negocio...">
+    </div>
+    <div class="business-list" id="businessList"></div>
+  `;
 
-  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
-  if (result.rows.length === 0) {
-    await pool.query(
-      "INSERT INTO users (email, password_hash, is_admin, role, name) VALUES ($1, $2, $3, $4, $5)",
-      [email, passwordHash, true, "admin", "Administrador"]
-    );
-    console.log(`✅ Admin creado: ${email} / ${password}`);
-  } else {
-    console.log("⚡ Admin ya existe, no se creó otro.");
+  const list = $("#businessList");
+  const search = $("#storeSearch");
+
+  function draw(items) {
+    list.innerHTML = items.map(s => `
+      <button class="business-item" data-id="${s.id}" style="${STATE.selectedStoreId===s.id ? 'background:#f9fafb' : ''}">
+        <img src="https://via.placeholder.com/32x32?text=%20" alt="">
+        <div>
+          <div class="business-name">${s.name}</div>
+          <div class="business-category">${(s.product_count ?? 0)} productos</div>
+        </div>
+      </button>
+    `).join("");
   }
-}
-createDefaultAdmin().catch(console.error);
+  draw(STATE.stores);
 
-// ================= MIDDLEWARE =================
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader) return res.status(401).json({ error: "No token provided" });
-  const token = authHeader.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, isAdmin, role, isSeller? }
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
+  list.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".business-item");
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+    await selectStore(id);
+    // re-dibuja para marcar activa
+    draw(STATE.stores);
+  });
+
+  search?.addEventListener("input", () => {
+    const q = search.value.trim().toLowerCase();
+    const filtered = !q ? STATE.stores : STATE.stores.filter(s => (s.name || "").toLowerCase().includes(q));
+    draw(filtered);
+  });
+}
+
+async function selectStore(storeId) {
+  STATE.selectedStoreId = Number(storeId);
+  ls.set(SELECTED_STORE_KEY, STATE.selectedStoreId);
+  resetCartForStore(STATE.selectedStoreId);
+
+  // Título de sección
+  const store = STATE.stores.find(s => s.id === STATE.selectedStoreId);
+  const title = $("#productsTitle");
+  if (title) title.textContent = store ? `Productos de ${store.name}` : "Productos disponibles";
+
+  // Carga productos de esa tienda
+  const r = await api(`/products?store_id=${STATE.selectedStoreId}`);
+  STATE.allProducts = (r.products || []);
+  fillCategories(STATE.allProducts);
+  renderProducts();
+}
+
+function currentFilteredProducts() {
+  const { q, category, min, max } = STATE.filters;
+  return STATE.allProducts.filter(p => {
+    const name = (p.name || p.title || "").toLowerCase();
+    const okQ = !q || name.includes(q.toLowerCase());
+    const cat = (p.category || "").toLowerCase();
+    const okCat = !category || cat === category.toLowerCase();
+    const price = Number(p.price_xaf ?? p.price ?? 0);
+    const okMin = price >= (Number(min) || 0);
+    const okMax = price <= (Number(max) || 999999999);
+    return okQ && okCat && okMin && okMax;
+  });
+}
+function fillCategories(products) {
+  const catSel = $("#categoryFilter");
+  if (!catSel) return;
+  const cats = [...new Set(products.map(p => (p.category || "").trim()).filter(Boolean))].sort();
+  catSel.innerHTML = `<option value="">Todas las categorías</option>` + cats.map(c => `<option>${c}</option>`).join("");
+}
+function renderProducts() {
+  const host = $("#productsList");
+  if (!host) return;
+  const items = currentFilteredProducts();
+  host.innerHTML = items.map(p => `
+    <div class="product-card">
+      <img src="${p.image_url || 'https://via.placeholder.com/300x160?text=%20'}" alt="">
+      <div class="product-info">
+        <div class="product-title">${p.name || p.title}</div>
+        <div class="product-price">${money(p.price_xaf ?? p.price)} XAF</div>
+        <button class="product-btn" data-id="${p.id}">Añadir al carrito</button>
+      </div>
+    </div>
+  `).join("");
+
+  host.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".product-btn");
+    if (!btn) return;
+    const id = Number(btn.getAttribute("data-id"));
+    const product = STATE.allProducts.find(x => x.id === id);
+    if (!product) return;
+    addToCart(product, 1);
+  }, { once: true });
+}
+
+function initIndexFilters() {
+  const q = $("#searchInput");                // ya existe en topbar de index  :contentReference[oaicite:7]{index=7}
+  const qBtn = $("#searchBtn");               // idem
+  const cat = $("#categoryFilter");
+  const min = $("#minPriceFilter");
+  const max = $("#maxPriceFilter");
+
+  function apply() {
+    STATE.filters = {
+      q: q?.value || "",
+      category: cat?.value || "",
+      min: min?.value || 0,
+      max: max?.value || 100000
+    };
+    renderProducts();
   }
+  qBtn?.addEventListener("click", apply);
+  q?.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
+  cat?.addEventListener("change", apply);
+  min?.addEventListener("change", apply);
+  max?.addEventListener("change", apply);
 }
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-    const role = req.user.role || (req.user.isAdmin ? "admin" : "buyer");
-    if (role === "admin" || roles.includes(role)) return next();
-    return res.status(403).json({ error: "Not authorized" });
-  };
-}
-// ================= MIDDLEWARE OPCIONAL =================
-function authMiddlewareOptional(req, _res, next) {
-  const authHeader = req.headers["authorization"];
-  if (authHeader) {
-    const token = authHeader.split(" ")[1];
+
+// ==== Login & Signup (login.html) ====
+function initAuthPage() {
+  const loginForm = $("#loginForm");
+  const signupForm = $("#signupForm");
+
+  loginForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(loginForm);
+    const payload = { email: fd.get("email"), password: fd.get("password") };
     try {
-      const decoded = jwt.verify(token, JWT_SECRET);
-      req.user = decoded;
+      const r = await api("/auth/login", { method: "POST", body: JSON.stringify(payload) });
+      setSession(r.token, r.user);
+      // volver a inicio
+      location.href = "index.html";
+    } catch (err) {
+      alert(err?.error || "No se pudo iniciar sesión");
+    }
+  });
+
+  signupForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(signupForm);
+    const email = fd.get("email");
+    const password = fd.get("password");
+    const payload = {
+      name: fd.get("name"),
+      phone: fd.get("phone"),
+      email,
+      password
+    };
+    try {
+      // Importante: solo llamamos a UN endpoint para evitar duplicados; luego autenticamos.
+      await api("/auth/signup", { method: "POST", body: JSON.stringify(payload) });
+      const loginRes = await api("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+      setSession(loginRes.token, loginRes.user);
+      location.href = "index.html";
+    } catch (err) {
+      alert(err?.error || "No se pudo crear la cuenta");
+    }
+  });
+}
+
+// ==== Admin (admin.html) ====
+function initAdminPage() {
+  const createSellerForm = $("#createSellerForm");
+  const refreshUsersBtn = $("#refreshUsers");
+  const usersTable = $("#usersTable");
+
+  async function drawUsers() {
+    try {
+      const r = await api("/admin/users");
+      const rows = (r.users || []).map(u => `
+        <tr>
+          <td>${u.id}</td>
+          <td>${u.name || ""}</td>
+          <td>${u.email}</td>
+          <td>${u.phone || ""}</td>
+          <td>${u.role || (u.is_admin ? "admin" : "buyer")}</td>
+          <td>${new Date(u.created_at).toLocaleString()}</td>
+        </tr>
+      `).join("");
+      usersTable.innerHTML = `
+        <table>
+          <thead><tr><th>ID</th><th>Nombre</th><th>Email</th><th>Teléfono</th><th>Rol</th><th>Alta</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    } catch (e) {
+      usersTable.innerHTML = `<p style="color:#b91c1c">No se pudieron cargar los usuarios.</p>`;
+    }
+  }
+
+  refreshUsersBtn?.addEventListener("click", drawUsers);
+  createSellerForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(createSellerForm);
+    const payload = {
+      name: fd.get("name"),
+      email: fd.get("email"),
+      password: fd.get("password"),
+      phone: fd.get("phone") || null,
+      store_name: fd.get("store_name"),
+    };
+    try {
+      await api("/admin/create-seller", { method: "POST", body: JSON.stringify(payload) });
+      alert("✅ Vendedor y tienda creados");
+      createSellerForm.reset();
+      drawUsers();
+    } catch (err) {
+      alert(err?.error || "Error al crear vendedor");
+    }
+  });
+
+  // carga inicial
+  if (usersTable) drawUsers();
+}
+
+// ==== Seller (seller.html) ====
+function initSellerPage() {
+  const form = $("#newProductForm");
+  const grid = $("#sellerProducts");
+  const ordersBox = $("#sellerOrders");
+
+  async function loadMyProducts() {
+    try {
+      const r = await api("/seller/products");
+      grid.innerHTML = (r.products || []).map(p => `
+        <div class="card product">
+          <img src="${p.image_url || 'https://via.placeholder.com/300x160?text=%20'}" alt="">
+          <div class="title">${p.name || p.title}</div>
+          <div class="price">${money(p.price_xaf ?? p.price)} XAF</div>
+        </div>
+      `).join("");
     } catch {
-      // Token inválido -> lo ignoramos (pedido de invitado)
+      grid.innerHTML = `<p style="color:#b91c1c">No se pudieron cargar tus productos.</p>`;
     }
   }
-  next();
+  async function loadMyOrders() {
+    try {
+      const r = await api("/seller/orders");
+      const blocks = (r.orders || []).map(o => `
+        <div class="card" style="margin-bottom:1rem">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <strong>Pedido #${o.id}</strong>
+            <span>${new Date(o.created_at).toLocaleString()}</span>
+          </div>
+          <div>Cliente: ${o.guest_name || "-"}</div>
+          <div>Teléfono: ${o.guest_phone || "-"}</div>
+          <div>Entrega: ${o.fulfillment_type}</div>
+          <div style="margin:.5rem 0">
+            ${o.items.map(it => `<div>• ${it.title} × ${it.qty} — ${money(it.unit_price_xaf)} XAF</div>`).join("")}
+          </div>
+          <div><strong>Total:</strong> ${money(o.total_xaf)} XAF</div>
+          <div style="margin-top:.5rem">
+            <label>Cambiar estado:
+              <select data-order="${o.id}" class="seller-status">
+                ${["CREATED","CONFIRMED","SHIPPED","DELIVERED","CANCELLED"].map(s => `
+                  <option ${s===o.status ? "selected" : ""} value="${s}">${s}</option>
+                `).join("")}
+              </select>
+            </label>
+          </div>
+        </div>
+      `).join("");
+      ordersBox.innerHTML = blocks || "<p>No tienes pedidos todavía.</p>";
+
+      ordersBox.addEventListener("change", async (e) => {
+        const sel = e.target.closest(".seller-status");
+        if (!sel) return;
+        const id = sel.getAttribute("data-order");
+        try {
+          await api(`/seller/orders/${id}/status`, { method: "PUT", body: JSON.stringify({ status: sel.value }) });
+          alert("Estado actualizado");
+        } catch {
+          alert("No se pudo actualizar el estado");
+        }
+      }, { once: true });
+    } catch {
+      ordersBox.innerHTML = `<p style="color:#b91c1c">No se pudieron cargar los pedidos.</p>`;
+    }
+  }
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const payload = {
+      title: fd.get("title"),
+      name: fd.get("title"),
+      price_xaf: fd.get("price_xaf"),
+      price: fd.get("price_xaf"),
+      image_url: fd.get("image_url"),
+      stock: Number(fd.get("stock") || 0)
+    };
+    try {
+      await api("/seller/products", { method: "POST", body: JSON.stringify(payload) });
+      form.reset();
+      loadMyProducts();
+      alert("✅ Producto creado");
+    } catch (err) {
+      alert(err?.error || "No se pudo crear el producto");
+    }
+  });
+
+  loadMyProducts();
+  loadMyOrders();
 }
 
+// ==== Boot por página ====
+document.addEventListener("DOMContentLoaded", async () => {
+  updateTopbar();
 
-async function handleRegister(req, res) {
-  const { email, password, name, phone, role } = req.body;
-  try {
-    // 1. Verificar si ya existe
-    const existing = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ error: "El email ya está en uso" });
+  const path = location.pathname;
+
+  // index.html: sidebar negocios, lista de productos y carrito  :contentReference[oaicite:8]{index=8}
+  if (path.endsWith("/") || path.endsWith("index.html")) {
+    try {
+      await loadStores();
+    } catch (e) {
+      console.error(e);
+      $("#productsList") && ($("#productsList").innerHTML = `<p style="color:#b91c1c">No se pudieron cargar los negocios/productos.</p>`);
     }
-
-    // 2. Crear hash y guardar
-    const passwordHash = await bcrypt.hash(password, 10);
-    const r = await pool.query(
-      "INSERT INTO users (email, password_hash, name, phone, role) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-      [email, passwordHash, name || null, phone || null, role || "buyer"]
-    );
-    const user = mapUser(r.rows[0]);
-
-    // 3. Generar token de login directo
-    const payload = { id: user.id, email: user.email, role: user.role };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-
-    return res.json({ message: "User registered", token, user });
-  } catch (err) {
-    console.error("Error en registro:", err);
-    return res.status(500).json({ error: "Error interno al registrar usuario" });
+    initIndexFilters();
+    initCartUI();
   }
-}
 
-async function handleLogin(req, res) {
-  const { email, password } = req.body;
-  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
-  const user = result.rows[0];
-  if (!user) return res.status(400).json({ error: "User not found" });
-
-  const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) return res.status(400).json({ error: "Invalid password" });
-
-  const role = user.role || (user.is_admin ? "admin" : user.is_seller ? "seller" : "buyer");
-  const payload = {
-    id: user.id,
-    email: user.email,
-    isAdmin: user.is_admin,
-    role,
-    isSeller: user.is_seller,
-  };
-  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-  res.json({ token, user: mapUser(user) });
-}
-
-app.post("/api/register", handleRegister);
-app.post("/api/auth/signup", handleRegister);
-app.post("/api/login", handleLogin);
-app.post("/api/auth/login", handleLogin);
-
-app.get("/api/profile", authMiddleware, async (req, res) => {
-  const result = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-  res.json(mapUser(result.rows[0]));
-});
-
-// ================= STORES (NEGOCIOS) =================
-// Función común para listar stores con fallback si la columna cambia entre despliegues
-async function loadStoresRows() {
-  try {
-    const r = await pool.query(`
-      SELECT 
-        s.id, 
-        s.name, 
-        s.seller_user_id, 
-        s.active,
-        s.created_at, 
-        u.name as seller_name, 
-        u.email as seller_email,
-        COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
-      FROM stores s 
-      LEFT JOIN users u ON u.id = s.seller_user_id
-      ORDER BY s.id DESC
-    `);
-    return r.rows;
-  } catch (e) {
-    if (e && e.code === "42703") {
-      // Fallback para esquemas viejos con seller_id
-      const r2 = await pool.query(`
-        SELECT 
-          s.id, 
-          s.name, 
-          s.seller_id AS seller_user_id, 
-          s.active,
-          s.created_at, 
-          u.name as seller_name, 
-          u.email as seller_email,
-          COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
-        FROM stores s 
-        LEFT JOIN users u ON u.id = s.seller_id
-        ORDER BY s.id DESC
-      `);
-      return r2.rows;
-    }
-    throw e;
+  // login.html: login/registro  :contentReference[oaicite:9]{index=9}
+  if (path.endsWith("login.html")) {
+    initAuthPage();
   }
-}
 
-app.get("/api/stores", async (_req, res) => {
-  try {
-    const rows = await loadStoresRows();
-    res.json({ stores: rows });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Cannot load stores" });
+  // admin.html  :contentReference[oaicite:10]{index=10}
+  if (path.endsWith("admin.html")) {
+    initAdminPage();
+  }
+
+  // seller.html  :contentReference[oaicite:11]{index=11}
+  if (path.endsWith("seller.html")) {
+    initSellerPage();
   }
 });
-
-// Aliases comunes por si el frontend usa otros paths
-app.get("/api/shops", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-app.get("/api/businesses", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-app.get("/api/negocios", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-
-// ================= PRODUCTOS =================
-app.get("/api/products", async (req, res) => {
-  const { store_id } = req.query;
-  let sql = "SELECT * FROM products";
-  const params = [];
-  if (store_id) {
-    sql += " WHERE store_id=$1";
-    params.push(store_id);
-  }
-  sql += " ORDER BY id DESC";
-  const result = await pool.query(sql, params);
-  res.json({ products: result.rows.map(mapProduct) });
-});
-
-app.get("/api/products/:id", async (req, res) => {
-  const result = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
-  if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
-  res.json(mapProduct(result.rows[0]));
-});
-
-// Admin crea/edita productos (acepta alias y parsea precio)
-app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res) => {
-  try {
-    const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
-    const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
-    const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
-    const image_url = getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null;
-    const active = req.body.active === false ? false : true;
-    const category = getFirst(req.body.category, req.body.categoria, req.body.cat) || null;
-    const store_id = req.body.store_id || null;
-    const seller_id = req.body.seller_id || null;
-
-    if (!name) return res.status(400).json({ error: "Falta el nombre del producto" });
-    if (price === null) return res.status(400).json({ error: "Falta o es inválido el precio" });
-
-    const result = await pool.query(
-      `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [name, price, stock, image_url, active, category, store_id, seller_id]
-    );
-    res.json(mapProduct(result.rows[0]));
-  } catch (err) {
-    console.error("Error admin creando producto:", err);
-    res.status(500).json({ error: "No se pudo crear el producto" });
-  }
-});
-
-app.put("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
-  // También aceptamos alias en updates
-  const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
-  const priceParsed = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
-  const stockParsed = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty));
-
-  const updates = {
-    name: name ?? null,
-    price: Number.isFinite(priceParsed) ? priceParsed : null,
-    stock: Number.isFinite(stockParsed) ? stockParsed : null,
-    image_url: getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null,
-    active: typeof req.body.active === "boolean" ? req.body.active : null,
-    category: getFirst(req.body.category, req.body.categoria, req.body.cat) || null,
-    store_id: req.body.store_id ?? null,
-    seller_id: req.body.seller_id ?? null,
-  };
-
-  const result = await pool.query(
-    `UPDATE products SET
-      name=COALESCE($1,name),
-      price=COALESCE($2,price),
-      stock=COALESCE($3,stock),
-      image_url=COALESCE($4,image_url),
-      active=COALESCE($5,active),
-      category=COALESCE($6,category),
-      store_id=COALESCE($7,store_id),
-      seller_id=COALESCE($8,seller_id)
-     WHERE id=$9 RETURNING *`,
-    [
-      updates.name,
-      updates.price,
-      updates.stock,
-      updates.image_url,
-      updates.active,
-      updates.category,
-      updates.store_id,
-      updates.seller_id,
-      req.params.id,
-    ]
-  );
-  res.json(mapProduct(result.rows[0]));
-});
-
-app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
-  await pool.query("DELETE FROM products WHERE id=$1", [req.params.id]);
-  res.json({ message: "Deleted" });
-});
-
-// ================= CARRITO (compat) =================
-app.get("/api/cart/:userId", async (req, res) => {
-  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
-  res.json(result.rows);
-});
-app.post("/api/cart/:userId", async (req, res) => {
-  const { productId, quantity } = req.body;
-  await pool.query("INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3)", [
-    req.params.userId,
-    productId,
-    quantity,
-  ]);
-  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
-  res.json(result.rows);
-});
-app.delete("/api/cart/:userId/:productId", async (req, res) => {
-  await pool.query("DELETE FROM cart WHERE user_id=$1 AND product_id=$2", [req.params.userId, req.params.productId]);
-  const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
-  res.json(result.rows);
-});
-
-// ================= PEDIDOS (con invitado o usuario) =================
-app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
-  try {
-    const userId = req.body.userId || req.user?.id || null;
-    const itemsRaw = req.body.items || [];
-    const items = itemsRaw
-      .map((i) => ({
-        productId: i.productId || i.product_id,
-        quantity: i.quantity || i.qty,
-      }))
-      .filter((i) => i.productId && i.quantity > 0);
-
-    const fulfillment_type = req.body.fulfillment_type || "pickup";
-    const guest_name = req.body.guest_name || null;
-    const guest_phone = req.body.guest_phone || null;
-    const address = req.body.address || null;
-
-    if (!items.length) return res.status(400).json({ error: "Empty items" });
-
-    const productIds = items.map((i) => i.productId);
-    const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
-
-    let subtotal = 0;
-    for (const it of items) {
-      const p = r.rows.find((x) => x.id === it.productId);
-      if (p) subtotal += Number(p.price) * it.quantity;
-    }
-    const delivery = fulfillment_type === "delivery" ? 2000 : 0;
-    const total = subtotal + delivery;
-
-    const orderResult = await pool.query(
-      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
-    );
-    const order = orderResult.rows[0];
-
-    for (const it of items) {
-      const p = r.rows.find((x) => x.id === it.productId);
-      const unit = p ? Number(p.price) : 0;
-      await pool.query(
-        "INSERT INTO order_items (order_id, product_id, quantity, unit_price_xaf) VALUES ($1,$2,$3,$4)",
-        [order.id, it.productId, it.quantity, unit]
-    );
-
-    }
-
-    res.json({
-      success: true,
-      order_id: order.id,
-      order: {
-        id: order.id,
-        total_xaf: Number(order.total),
-        status: order.status,
-        fulfillment_type: order.fulfillment_type,
-        created_at: order.created_at,
-      },
-    });
-  } catch (err) {
-    console.error("Error creando pedido:", err);
-    res.status(500).json({ error: "No se pudo crear el pedido" });
-  }
-});
-
-
-// ================= ADMIN =================
-app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
-  const r = await pool.query("SELECT * FROM users ORDER BY id DESC");
-  res.json({ users: r.rows.map(mapUser) });
-});
-
-app.post("/api/admin/create-seller", authMiddleware, requireRole("admin"), async (req, res) => {
-  const { name, email, password, phone, store_name } = req.body;
-  if (!email || !password || !name) return res.status(400).json({ error: "Faltan campos" });
-  const passwordHash = await bcrypt.hash(password, 10);
-  try {
-    const u = await pool.query(
-      "INSERT INTO users (email, password_hash, name, phone, role, is_admin, is_seller) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [email, passwordHash, name, phone || null, "seller", false, true]
-    );
-    const sellerId = u.rows[0].id;
-    const s = await pool.query(
-      "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING *",
-      [store_name || `${name}'s Store`, sellerId]
-    );
-    res.json({ seller_user_id: sellerId, store_id: s.rows[0].id });
-} catch (e) {
-  console.error("Error creando vendedor:", e);
-  if (e.code === "23505") { // Código de error UNIQUE violation en PostgreSQL
-    return res.status(400).json({ error: "Email duplicado" });
-  }
-  res.status(500).json({ error: "Error interno al crear vendedor", details: e.message });
-}
-
-});
-
-// ================= SELLER =================
-app.get("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
-  const r = await pool.query("SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC", [req.user.id]);
-  res.json({ products: r.rows.map(mapProduct) });
-});
-
-// Vendedor crea producto (acepta alias, parsea precio y autocrea tienda si falta)
-app.post("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
-  try {
-    // Alias del frontend y parseo robusto
-    const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
-    const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
-    const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
-    const image_url = getFirst(req.body.image_url, req.body.image, req.body.imageUrl) || null;
-    const active = req.body.active === false ? false : true;
-    const category = getFirst(req.body.category, req.body.categoria, req.body.cat) || null;
-
-    if (!name) return res.status(400).json({ error: "Falta el nombre del producto" });
-    if (price === null) return res.status(400).json({ error: "Falta o es inválido el precio" });
-
-    // buscar / crear la store del vendedor
-    let storeR = await pool.query("SELECT id FROM stores WHERE seller_user_id=$1 LIMIT 1", [req.user.id]);
-    if (storeR.rows.length === 0) {
-      const userR = await pool.query("SELECT name, email FROM users WHERE id=$1", [req.user.id]);
-      const baseName = userR.rows[0]?.name || userR.rows[0]?.email || "Mi Tienda";
-      storeR = await pool.query(
-        "INSERT INTO stores (name, seller_user_id, active) VALUES ($1,$2,TRUE) RETURNING id",
-        [baseName, req.user.id]
-      );
-    }
-    const storeId = storeR.rows[0].id;
-
-    const r = await pool.query(
-      `INSERT INTO products (name, price, stock, image_url, active, category, store_id, seller_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [name, price, stock, image_url, active, category, storeId, req.user.id]
-    );
-
-    res.json({ product: mapProduct(r.rows[0]) });
-  } catch (err) {
-    console.error("Error creando producto:", err);
-    res.status(500).json({ error: "No se pudo crear el producto" });
-  }
-});
-
-app.get("/api/seller/orders", authMiddleware, requireRole("seller"), async (req, res) => {
-  const r = await pool.query(
-    `
-    SELECT DISTINCT o.*
-    FROM orders o
-    JOIN order_items oi ON oi.order_id = o.id
-    JOIN products p ON p.id = oi.product_id
-    WHERE p.seller_id = $1
-    ORDER BY o.id DESC
-  `,
-    [req.user.id]
-  );
-
-  const orders = [];
-  for (const o of r.rows) {
-    const itemsR = await pool.query(
-      `
-      SELECT oi.product_id, oi.quantity, oi.unit_price, p.name
-      FROM order_items oi
-      JOIN products p ON p.id = oi.product_id
-      WHERE oi.order_id=$1 AND p.seller_id=$2
-    `,
-      [o.id, req.user.id]
-    );
-    const items = itemsR.rows.map((it) => ({
-      product_id: it.product_id,
-      title: it.name,
-      qty: it.quantity,
-      unit_price_xaf: Number(it.unit_price),
-    }));
-    const subtotal = items.reduce((s, i) => s + i.unit_price_xaf * i.qty, 0);
-    orders.push({
-      id: o.id,
-      created_at: o.created_at,
-      guest_name: o.guest_name,
-      guest_phone: o.guest_phone,
-      address: o.address,
-      fulfillment_type: o.fulfillment_type,
-      status: o.status,
-      subtotal_xaf: subtotal,
-      total_xaf: Number(o.total),
-      items,
-    });
-  }
-  res.json({ orders });
-});
-
-app.put("/api/seller/orders/:id/status", authMiddleware, requireRole("seller"), async (req, res) => {
-  const { status } = req.body;
-  const authR = await pool.query(
-    `
-    SELECT 1
-    FROM order_items oi JOIN products p ON p.id = oi.product_id
-    WHERE oi.order_id=$1 AND p.seller_id=$2
-    LIMIT 1
-  `,
-    [req.params.id, req.user.id]
-  );
-  if (authR.rows.length === 0) return res.status(403).json({ error: "No autorizado" });
-
-  await pool.query("UPDATE orders SET status=$1 WHERE id=$2", [status, req.params.id]);
-  res.json({ message: "Estado actualizado" });
-});
-
-// ================= START =================
-app.get("/", (_req, res) => res.send("✅ API WapMarket funcionando"));
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
