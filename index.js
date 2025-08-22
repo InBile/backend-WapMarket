@@ -5,9 +5,11 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
-const cors = require("cors");
+const app = express();
+app.use(express.json());
+
 app.use(cors({
-  origin: "wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app", // en producción puedes poner tu dominio del frontend
+  origin: "https://wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app", 
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
