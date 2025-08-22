@@ -7,13 +7,7 @@ const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
-
-app.use(cors({
-  origin: "https://wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app", 
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
-
+app.use(cors());
 
 // ================= CONFIG =================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
@@ -118,41 +112,11 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS order_items (
       id SERIAL PRIMARY KEY,
       order_id INT REFERENCES orders(id) ON DELETE CASCADE,
-      product_id INT REFERENCES products(id) ON DELETE CASCADE,
+      product_id INT REFERENCES products(id),
       quantity INT NOT NULL,
-      unit_price NUMERIC NOT NULL
-);
-
+      unit_price NUMERIC
+    );
   `);
-  
-  // ========= ORDERS: parcheo columnas que podrían faltar =========
-  await pool.query(`
-    ALTER TABLE orders
-      ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS total NUMERIC DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'CREATED',
-      ADD COLUMN IF NOT EXISTS fulfillment_type TEXT DEFAULT 'pickup',
-      ADD COLUMN IF NOT EXISTS guest_name TEXT,
-      ADD COLUMN IF NOT EXISTS guest_phone TEXT,
-      ADD COLUMN IF NOT EXISTS address TEXT,
-      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  `);
-
-  // migración suave si existía una columna antigua
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'orders' AND column_name = 'buyer_user_id'
-      ) THEN
-        UPDATE orders
-        SET user_id = COALESCE(user_id, buyer_user_id)
-        WHERE user_id IS NULL;
-      END IF;
-    END $$;
-  `);
-
 
   // Columnas que podrían faltar (parche idempotente)
   await pool.query(`
@@ -505,37 +469,20 @@ app.post("/api/orders", async (req, res) => {
   const delivery = fulfillment_type === "delivery" ? 2000 : 0;
   const total = subtotal + delivery;
 
-  let order;
-  try {
-    const orderResult = await pool.query(
-      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
-    );
-    order = orderResult.rows[0];
-  } catch (e) {
-    // Si falla por columna inexistente, auto-parchea y reintenta una vez
-    if (e && e.code === "42703") {
-      await pool.query(`
-        ALTER TABLE orders
-          ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL
-      `);
-      const orderResult2 = await pool.query(
-        "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-        [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
-      );
-      order = orderResult2.rows[0];
-    } else {
-      console.error(e);
-      return res.status(500).json({ error: "Cannot create order" });
-    }
-  }
+  const orderResult = await pool.query(
+    "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+    [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
+  );
+  const order = orderResult.rows[0];
 
-  // insertar items
   for (const it of items) {
     const p = r.rows.find((x) => x.id === it.productId);
     const unit = p ? Number(p.price) : 0;
     await pool.query("INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)", [
-      order.id, it.productId, it.quantity, unit,
+      order.id,
+      it.productId,
+      it.quantity,
+      unit,
     ]);
   }
 
@@ -551,7 +498,6 @@ app.post("/api/orders", async (req, res) => {
     },
   });
 });
-
 
 app.get("/api/orders/:userId", async (req, res) => {
   const result = await pool.query("SELECT * FROM orders WHERE user_id=$1 ORDER BY id DESC", [req.params.userId]);
