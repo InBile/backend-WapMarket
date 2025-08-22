@@ -1,165 +1,210 @@
-// ====== Bootstrap previo a middlewares/rutas (con DB completa y segura) ======
-require("dotenv").config();
+// Backend Express + PostgreSQL extendido (compat con tu frontend actual)
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
-const app = express();
-app.set("trust proxy", 1);
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app",
+  "https://wapmarket-frontend-782avncnc-romans-projects-0350dc58.vercel.app"
+];
 
-// ====== PostgreSQL Pool ======
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+
+// ================= CONFIG =================
+const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
+const PORT = process.env.PORT || 3000;
+
+// ================= POSTGRES =================
 const pool = new Pool({
-  connectionString:
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    process.env.POSTGRES_CONNECTION_STRING,
-  ...(process.env.NODE_ENV === "production" ? { ssl: { rejectUnauthorized: false } } : {}),
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
 });
 
-// ====== Migraciones / Esquema ======
+// ================= HELPERS =================
+const mapProduct = (p) => ({
+  id: p.id,
+  name: p.name,
+  price: Number(p.price),
+  title: p.name,
+  price_xaf: Number(p.price),
+  stock: p.stock ?? 0,
+  image_url: p.image_url || null,
+  active: p.active ?? true,
+  category: p.category || null,
+  store_id: p.store_id || null,
+});
+
+const mapUser = (u) => ({
+  id: u.id,
+  email: u.email,
+  name: u.name || null,
+  phone: u.phone || null,
+  role: u.role || (u.is_admin ? "admin" : "buyer"),
+  is_admin: !!u.is_admin,
+  created_at: u.created_at,
+});
+
+// === Helpers de compatibilidad (alias + parseo de precio) ===
+const getFirst = (...vals) =>
+  vals.find((v) => v !== undefined && v !== null && String(v).trim() !== "");
+
+const parsePrice = (raw) => {
+  if (raw === undefined || raw === null) return null;
+  // Acepta números y strings tipo "2.500", "2,500", "2500 XAF"
+  const cleaned = String(raw).replace(/[^0-9]/g, "");
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+};
+
+// ================= DB INIT + PARCHEO SEGURO =================
 async function initDb() {
-  // users
+  // Tablas base (no fallan si ya existen)
   await pool.query(`
+    -- ========= USERS =========
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      is_admin BOOLEAN DEFAULT false,
+      is_seller BOOLEAN DEFAULT false,
       name TEXT,
-      email TEXT UNIQUE,
-      password TEXT,
-      role TEXT DEFAULT 'buyer',
       phone TEXT,
-      created_at TIMESTAMP DEFAULT now()
+      role TEXT DEFAULT 'buyer',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
-  `);
 
-  // stores
-  await pool.query(`
+    -- ========= STORES =========
     CREATE TABLE IF NOT EXISTS stores (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
-      owner_id INT REFERENCES users(id),
-      created_at TIMESTAMP DEFAULT now()
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
-  `);
 
-  // products
-  await pool.query(`
+    -- ========= PRODUCTS =========
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
-      store_id INT REFERENCES stores(id),
-      name TEXT,
-      title TEXT,
-      price NUMERIC DEFAULT 0,
-      stock INT DEFAULT 0,
-      image_url TEXT,
-      active BOOLEAN DEFAULT true,
-      category TEXT,
-      created_at TIMESTAMP DEFAULT now()
+      name TEXT NOT NULL,
+      price NUMERIC NOT NULL,
+      seller_user_id INT REFERENCES users(id) ON DELETE SET NULL
     );
-  `);
 
-  // orders
-  await pool.query(`
+    -- ========= CART =========
+    CREATE TABLE IF NOT EXISTS cart (
+      id SERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      product_id INT REFERENCES products(id) ON DELETE CASCADE,
+      quantity INT NOT NULL
+    );
+
+    -- ========= ORDERS =========
     CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
-      user_id INT REFERENCES users(id),          -- para pedidos de usuario
-      total NUMERIC DEFAULT 0,
+      user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      total NUMERIC NOT NULL,
       status TEXT DEFAULT 'CREATED',
-      fulfillment_type TEXT,                     -- 'pickup' | 'delivery'
-      guest_name TEXT,                           -- para invitado
+      fulfillment_type TEXT DEFAULT 'pickup',
+      guest_name TEXT,
       guest_phone TEXT,
       address TEXT,
-      created_at TIMESTAMP DEFAULT now()
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
-  `);
 
-  // order_items
-  await pool.query(`
     CREATE TABLE IF NOT EXISTS order_items (
       id SERIAL PRIMARY KEY,
       order_id INT REFERENCES orders(id) ON DELETE CASCADE,
       product_id INT REFERENCES products(id),
-      quantity INT,
+      quantity INT NOT NULL,
       unit_price NUMERIC
     );
   `);
 
-  // Asegurar columnas que el frontend/consultas usan
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now();`);
-  await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS title TEXT;`);
-  await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;`);
-  await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;`);
-  await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT;`);
-  await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now();`);
-  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT;`);
-  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS guest_name TEXT;`);
-  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS guest_phone TEXT;`);
-  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS address TEXT;`);
-  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now();`);
+  // Columnas que podrían faltar (parche idempotente)
+  await pool.query(`
+    -- stores
+    ALTER TABLE stores
+      ADD COLUMN IF NOT EXISTS seller_user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
 
-  // Si existiese una columna antigua buyer_user_id, copiarla a user_id
+    -- products
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS store_id INT REFERENCES stores(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS seller_id INT REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS image_url TEXT,
+      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS category TEXT;
+
+    -- índices
+    CREATE INDEX IF NOT EXISTS idx_products_seller_id ON products(seller_id);
+    CREATE INDEX IF NOT EXISTS idx_products_store_id ON products(store_id);
+    CREATE INDEX IF NOT EXISTS idx_stores_seller_user_id ON stores(seller_user_id);
+  `);
+
+  // Migración suave: si alguna base antigua tiene stores.seller_id, copiar a seller_user_id
   await pool.query(`
     DO $$
     BEGIN
       IF EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name='orders' AND column_name='buyer_user_id'
+        WHERE table_name = 'stores' AND column_name = 'seller_id'
       ) THEN
-        ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INT;
-        EXECUTE 'UPDATE orders SET user_id = buyer_user_id WHERE user_id IS NULL';
+        UPDATE stores
+        SET seller_user_id = COALESCE(seller_user_id, seller_id)
+        WHERE seller_user_id IS NULL;
       END IF;
-    END$$;
+    END $$;
   `);
 
-  // Índices útiles
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_products_store_id ON products(store_id);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_items_product_id ON order_items(product_id);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);`);
-
-  console.log("✅ Esquema listo");
+  // Migración suave: si productos antiguos usan seller_user_id, copiar a seller_id
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'products' AND column_name = 'seller_user_id'
+      ) THEN
+        UPDATE products
+        SET seller_id = COALESCE(seller_id, seller_user_id)
+        WHERE seller_id IS NULL;
+      END IF;
+    END $$;
+  `);
 }
-initDb().catch((e) => {
-  console.error("❌ Error inicializando DB:", e);
-  process.exit(1);
-});
+initDb().catch(console.error);
 
-// ====== CORS (incluye tus dominios de Vercel) ======
-const defaultAllowedOrigins = [
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:5500",
-  "https://wapmarket-frontend-git-main-romans-projects-0350dc58.vercel.app",
-  "https://wapmarket-frontend-782avncnc-romans-projects-0350dc58.vercel.app",
-];
-const envAllowed =
-  (process.env.CORS_ORIGINS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-const allowedOrigins = envAllowed.length ? envAllowed : defaultAllowedOrigins;
+// ================= ADMIN POR DEFECTO =================
+async function createDefaultAdmin() {
+  const email = "admin@wapmarket.com";
+  const password = "naciel25091999"; // cámbialo luego
+  const passwordHash = await bcrypt.hash(password, 10);
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error("Not allowed by CORS"));
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
-  })
-);
-app.options("*", cors());
-
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true }));
-
-module.exports = { app, pool, jwt, bcrypt };
-
+  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+  if (result.rows.length === 0) {
+    await pool.query(
+      "INSERT INTO users (email, password_hash, is_admin, role, name) VALUES ($1, $2, $3, $4, $5)",
+      [email, passwordHash, true, "admin", "Administrador"]
+    );
+    console.log(`✅ Admin creado: ${email} / ${password}`);
+  } else {
+    console.log("⚡ Admin ya existe, no se creó otro.");
+  }
+}
+createDefaultAdmin().catch(console.error);
 
 // ================= MIDDLEWARE =================
 function authMiddleware(req, res, next) {
