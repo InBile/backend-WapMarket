@@ -90,25 +90,25 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     console.log("BODY:", req.body);
     console.log("FILE:", req.file);
 
-    const { title, price_xaf, stock, description } = req.body;
+    const { title, price_xaf, stock } = req.body;
 
-    // mapeo a columnas reales
+    // mapear valores a columnas reales
     const name = title;
     const price = parsePrice(price_xaf);
 
-    // genera la URL de la imagen
+    // generar URL de la imagen
     let imageUrl = null;
     if (req.file) {
       const backendUrl = process.env.BACKEND_URL || `http://localhost:${PORT}`;
       imageUrl = `${backendUrl}/uploads/${req.file.filename}`;
     }
 
-    // inserta en columnas correctas
+    // insertar en columnas correctas
     const result = await pool.query(
-      `INSERT INTO products (name, price, stock, description, image_url) 
-       VALUES ($1, $2, $3, $4, $5) 
+      `INSERT INTO products (name, price, stock, image_url) 
+       VALUES ($1, $2, $3, $4) 
        RETURNING *`,
-      [name, price, stock, description, imageUrl]
+      [name, price, stock, imageUrl]
     );
 
     res.json(mapProduct(result.rows[0]));
