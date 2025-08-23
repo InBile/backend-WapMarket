@@ -90,8 +90,9 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
 
     let imageUrl = null;
     if (req.file) {
-      imageUrl = `/uploads/${req.file.filename}`;
-    }
+  const backendUrl = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+  imageUrl = `${backendUrl}/uploads/${req.file.filename}`;
+}
 
     const result = await pool.query(
       `INSERT INTO products (title, price_xaf, stock, description, image_url) 
