@@ -7,6 +7,9 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
+const fetch = require("node-fetch");
+const FormData = require("form-data");
+
 const app = express();
 
 // Crear carpeta uploads si no existe
@@ -87,23 +90,37 @@ const parsePrice = (raw) => {
 // ================= RUTA: Crear producto =================
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
-    console.log("BODY:", req.body);
-    console.log("FILE:", req.file);
-
     const { title, price_xaf, stock } = req.body;
 
-    // mapear valores a columnas reales
     const name = title;
     const price = parsePrice(price_xaf);
 
-    // generar URL de la imagen
     let imageUrl = null;
+
     if (req.file) {
-      const backendUrl = process.env.BACKEND_URL || `http://localhost:${PORT}`;
-      imageUrl = `${backendUrl}/uploads/${req.file.filename}`;
+      const filePath = req.file.path;
+
+      // Crear form-data para ImgBB
+      const formData = new FormData();
+      formData.append("key", process.env.IMGBB_API_KEY); // 👈 tu API KEY
+      formData.append("image", fs.createReadStream(filePath));
+
+      // Subir a ImgBB
+      const response = await fetch("https://api.imgbb.com/1/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        imageUrl = data.data.url; // URL pública de la imagen
+      }
+
+      // Eliminar archivo temporal
+      fs.unlinkSync(filePath);
     }
 
-    // insertar en columnas correctas
+    // Guardar en la DB
     const result = await pool.query(
       `INSERT INTO products (name, price, stock, image_url) 
        VALUES ($1, $2, $3, $4) 
@@ -111,12 +128,13 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
       [name, price, stock, imageUrl]
     );
 
-    res.json(mapProduct(result.rows[0]));
+    res.json(result.rows[0]);
   } catch (err) {
     console.error("Error en /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
+
 
 
 // ================= DB INIT + PARCHEO SEGURO =================
