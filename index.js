@@ -84,26 +84,36 @@ const parsePrice = (raw) => {
   return Number.isFinite(n) ? n : null;
 };
 // ================= RUTA: Crear producto =================
+// ================= RUTA: Crear producto =================
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
+    console.log("BODY:", req.body);
+    console.log("FILE:", req.file);
+
     const { title, price_xaf, stock, description } = req.body;
 
+    // mapeo a columnas reales
+    const name = title;
+    const price = parsePrice(price_xaf);
+
+    // genera la URL de la imagen
     let imageUrl = null;
     if (req.file) {
-  const backendUrl = process.env.BACKEND_URL || `http://localhost:${PORT}`;
-  imageUrl = `${backendUrl}/uploads/${req.file.filename}`;
-}
+      const backendUrl = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+      imageUrl = `${backendUrl}/uploads/${req.file.filename}`;
+    }
 
+    // inserta en columnas correctas
     const result = await pool.query(
-      `INSERT INTO products (title, price_xaf, stock, description, image_url) 
+      `INSERT INTO products (name, price, stock, description, image_url) 
        VALUES ($1, $2, $3, $4, $5) 
        RETURNING *`,
-      [title, parsePrice(price_xaf), stock, description, imageUrl]
+      [name, price, stock, description, imageUrl]
     );
 
     res.json(mapProduct(result.rows[0]));
   } catch (err) {
-    console.error(err);
+    console.error("Error en /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
