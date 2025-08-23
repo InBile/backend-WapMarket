@@ -1,13 +1,41 @@
-// Backend Express + PostgreSQL extendido (compat con tu frontend actual)
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
+
+// Crear carpeta uploads si no existe
+const uploadDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
+// Configuración de multer
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  },
+});
+const upload = multer({ storage });
+
+// Servir imágenes estáticas (para acceder desde frontend)
+app.use("/uploads", express.static(uploadDir));
+
+// Middlewares
 app.use(express.json());
 app.use(cors());
+
+// Exportar para usar en index.js
+module.exports = { app, upload, Pool };
 
 // ================= CONFIG =================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
@@ -55,6 +83,30 @@ const parsePrice = (raw) => {
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;
 };
+// ================= RUTA: Crear producto =================
+app.post("/products", upload.single("image_file"), async (req, res) => {
+  try {
+    const { title, price_xaf, stock, description } = req.body;
+
+    let imageUrl = null;
+    if (req.file) {
+      imageUrl = `/uploads/${req.file.filename}`;
+    }
+
+    const result = await pool.query(
+      `INSERT INTO products (title, price_xaf, stock, description, image_url) 
+       VALUES ($1, $2, $3, $4, $5) 
+       RETURNING *`,
+      [title, parsePrice(price_xaf), stock, description, imageUrl]
+    );
+
+    res.json(mapProduct(result.rows[0]));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error al crear el producto" });
+  }
+});
+
 
 // ================= DB INIT + PARCHEO SEGURO =================
 async function initDb() {
