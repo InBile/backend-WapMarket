@@ -7,7 +7,10 @@ const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors({
+  origin: "https://wapmarket-frontend.vercel.app",
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
 
 // ================= CONFIG =================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
