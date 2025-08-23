@@ -7,15 +7,7 @@ const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
-app.use(cors({
-  origin: [
-    "https://wapmarket-frontend.vercel.app", // tu frontend en Vercel
-  ],
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true
-}));
-
+app.use(cors());
 
 // ================= CONFIG =================
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
@@ -235,36 +227,21 @@ function authMiddlewareOptional(req, _res, next) {
   next();
 }
 
-// ================= REGISTER =================
+
+// ================= AUTH =================
 async function handleRegister(req, res) {
   const { email, password, name, phone, role } = req.body;
   try {
-    // 1. Verificar si ya existe
-    const existing = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ error: "El email ya está en uso" });
-    }
-
-    // 2. Crear hash y guardar
     const passwordHash = await bcrypt.hash(password, 10);
     const r = await pool.query(
       "INSERT INTO users (email, password_hash, name, phone, role) VALUES ($1, $2, $3, $4, $5) RETURNING *",
       [email, passwordHash, name || null, phone || null, role || "buyer"]
     );
-    const user = mapUser(r.rows[0]);
-
-    // 3. Generar token de login directo
-    const payload = { id: user.id, email: user.email, role: user.role };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-
-    return res.json({ message: "User registered", token, user });
-  } catch (err) {
-    console.error("Error en registro:", err);
-    return res.status(500).json({ error: "Error interno al registrar usuario" });
+    res.json({ message: "User registered", user: mapUser(r.rows[0]) });
+  } catch {
+    res.status(400).json({ error: "Email already registered" });
   }
 }
-
-// ================= LOGIN =================
 async function handleLogin(req, res) {
   const { email, password } = req.body;
   const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
@@ -283,15 +260,9 @@ async function handleLogin(req, res) {
     isSeller: user.is_seller,
   };
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-
-  res.json({
-    message: "Login correcto",
-    token,
-    user: mapUser(user)  // 👈 mapUser ya incluye el rol
-  });
+  res.json({ token, user: mapUser(user) });
 }
 
-// ================= RUTAS AUTH =================
 app.post("/api/register", handleRegister);
 app.post("/api/auth/signup", handleRegister);
 app.post("/api/login", handleLogin);
@@ -301,7 +272,6 @@ app.get("/api/profile", authMiddleware, async (req, res) => {
   const result = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
   res.json(mapUser(result.rows[0]));
 });
-
 
 // ================= STORES (NEGOCIOS) =================
 // Función común para listar stores con fallback si la columna cambia entre despliegues
@@ -570,14 +540,9 @@ app.post("/api/admin/create-seller", authMiddleware, requireRole("admin"), async
       [store_name || `${name}'s Store`, sellerId]
     );
     res.json({ seller_user_id: sellerId, store_id: s.rows[0].id });
-} catch (e) {
-  console.error("Error creando vendedor:", e);
-  if (e.code === "23505") { // Código de error UNIQUE violation en PostgreSQL
-    return res.status(400).json({ error: "Email duplicado" });
+  } catch (e) {
+    res.status(400).json({ error: "No se pudo crear el vendedor (email duplicado?)" });
   }
-  res.status(500).json({ error: "Error interno al crear vendedor", details: e.message });
-}
-
 });
 
 // ================= SELLER =================
