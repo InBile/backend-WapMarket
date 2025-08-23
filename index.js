@@ -281,7 +281,8 @@ async function handleLogin(req, res) {
   res.json({
   message: "Login correcto",
   token,
-  user: mapUser(user)   // 👈 mapUser ya incluye el campo role
+  user: mapUser(user)
+  }// 👈 mapUser ya incluye el campo role
 });
 app.post("/api/register", handleRegister);
 app.post("/api/auth/signup", handleRegister);
