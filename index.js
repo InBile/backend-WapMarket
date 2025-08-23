@@ -278,9 +278,11 @@ async function handleLogin(req, res) {
     isSeller: user.is_seller,
   };
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-  res.json({ token, user: mapUser(user) });
-}
-
+  res.json({
+  message: "Login correcto",
+  token,
+  user: mapUser(user)   // 👈 mapUser ya incluye el campo role
+});
 app.post("/api/register", handleRegister);
 app.post("/api/auth/signup", handleRegister);
 app.post("/api/login", handleLogin);
