@@ -91,7 +91,7 @@ const parsePrice = (raw) => {
 // ================= RUTA: Crear producto =================
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
-    const { title, price_xaf, stock } = req.body;
+    const { name, price, stock, category, store_id, seller_id } = req.body;
     let imageUrl = null;
 
     if (req.file) {
@@ -107,8 +107,6 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
       });
 
       const data = await response.json();
-
-      // 👇 Aquí dentro, justo después de obtener la respuesta
       console.log("ImgBB response:", data);
 
       if (data.success) {
@@ -119,10 +117,10 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO products (title, price_xaf, stock, image_url) 
-       VALUES ($1, $2, $3, $4) 
+      `INSERT INTO products (name, price, stock, image_url, category, store_id, seller_id, active, create_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW()) 
        RETURNING *`,
-      [title, price_xaf, stock, imageUrl]
+      [name, price, stock, imageUrl, category, store_id, seller_id]
     );
 
     res.json(result.rows[0]);
