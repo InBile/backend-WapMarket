@@ -113,19 +113,19 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     const imageBytes = req.file ? req.file.buffer : null;
     const imageMime  = req.file ? req.file.mimetype : null;
 
-    const insert = await pool.query(
+   const insert = await pool.query(
   `INSERT INTO products (
     name, price, stock, category, store_id, seller_id, active, created_at, image_bytes, image_mime
   )
    VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7,$8)
-   RETURNING id, name, price, stock, category, store_id, seller_id, active, created_at`,
+   RETURNING *`,
   [
     name,
     Number(price),
     Number(stock || 0),
     category || null,
-    store_id || null,
-    seller_id || null,
+    store_id ? Number(store_id) : null,  // 👈 aquí debe ser 1, 4 o 5
+    seller_id ? Number(seller_id) : null,
     imageBytes,
     imageMime,
   ]
