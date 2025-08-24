@@ -9,6 +9,8 @@ const fs = require("fs");
 
 
 const FormData = require("form-data");
+console.log("ImgBB response:", data);
+
 
 const app = express();
 
