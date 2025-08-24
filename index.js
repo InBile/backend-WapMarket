@@ -7,7 +7,6 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-const response = await fetch("https://api.imgbb.com/1/upload", { ... });
 const FormData = require("form-data");
 
 const app = express();
