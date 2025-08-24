@@ -9,6 +9,24 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const { createClient } = require("@supabase/supabase-js");
 
+const jwt from "jsonwebtoken";
+
+// Middleware para verificar token y adjuntar usuario
+function authenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: "No autorizado" });
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // ahora tienes req.user.id y req.user.role
+    next();
+  } catch (e) {
+    return res.status(403).json({ error: "Token inválido" });
+  }
+}
+
+
 // ================= CONFIG =================
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
@@ -508,13 +526,22 @@ app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req
   res.json({ message: "Deleted" });
 });
 
-// ================= RUTA COMPAT para seller.html =================
-// Si tu frontend llama GET /sellers/:sellerId/products (público)
-app.get("/sellers/:sellerId/products", async (req, res) => {
+// ================= Productos de un seller (seguro) =================
+app.get("/sellers/:sellerId/products", authenticate, async (req, res) => {
   try {
     const sellerId = Number(req.params.sellerId);
     if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
-    const r = await pool.query("SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC", [sellerId]);
+
+    // Evita que un seller consulte productos de otro
+    if (sellerId !== req.user.id) {
+      return res.status(403).json({ error: "No puedes ver productos de otro seller" });
+    }
+
+    const r = await pool.query(
+      "SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC",
+      [sellerId]
+    );
+
     res.json(r.rows.map(mapProduct));
   } catch (err) {
     console.error("Error en /sellers/:id/products:", err);
