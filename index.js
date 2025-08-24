@@ -30,8 +30,13 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE; // SERVICE ROLE (solo bac
 const supabase = createClient(supabaseUrl, supabaseKey);
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "product-images";
 
-// ================= MULTER (memoria) =================
-const upload = multer({ storage: multer.memoryStorage() });
+// ================= MULTER =================
+const upload = multer({
+  storage: multer.memoryStorage(), // Guardamos en memoria (no en disco)
+  limits: { fileSize: 2 * 1024 * 1024 }, // Máx. 2MB
+});
+
+
 
 // ================= HELPERS =================
 const mapProduct = (p) => ({
@@ -375,50 +380,49 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     if (!name || !price) {
       return res.status(400).json({ error: "name y price son obligatorios" });
     }
-    if (!req.file) {
-      return res.status(400).json({ error: "Falta image_file" });
+
+    let publicUrl = null;
+
+    if (req.file) {
+      // nombre único
+      const ext = req.file.originalname.split(".").pop();
+      const fileName = `product_${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .upload(fileName, req.file.buffer, {
+          contentType: req.file.mimetype,
+        });
+
+      if (uploadError) throw uploadError;
+
+      // url pública
+      const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(fileName);
+      publicUrl = data.publicUrl;
     }
 
-    // Subir a Supabase Storage
-    const file = req.file;
-    const filePath = `products/${Date.now()}-${file.originalname}`;
-    const { error: uploadError } = await supabase.storage
-      .from(SUPABASE_BUCKET)
-      .upload(filePath, file.buffer, { contentType: file.mimetype });
-
-    if (uploadError) throw uploadError;
-
-    // URL pública
-    const { data: publicUrlData } = supabase.storage
-      .from(SUPABASE_BUCKET)
-      .getPublicUrl(filePath);
-    const image_url = publicUrlData.publicUrl;
-
-    // Insert en productos (guardamos image_url)
     const insert = await pool.query(
-      `INSERT INTO products (
-        name, price, stock, category, store_id, seller_id, image_url, active, created_at
-      )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,true,NOW())
+      `INSERT INTO products (name, price, stock, category, store_id, seller_id, active, created_at, image_url)
+       VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7)
        RETURNING *`,
       [
         name,
         Number(price),
         Number(stock || 0),
         category || null,
-        store_id ? Number(store_id) : null,
-        seller_id ? Number(seller_id) : null,
-        image_url,
+        store_id || null,
+        seller_id || null,
+        publicUrl,
       ]
     );
 
-    const product = mapProduct(insert.rows[0]);
-    res.json(product);
+    res.json(insert.rows[0]);
   } catch (err) {
     console.error("Error en /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
+
 
 // ================= PRODUCTOS (admin) =================
 app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res) => {
