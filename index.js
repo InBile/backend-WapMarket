@@ -547,6 +547,29 @@ app.get("/sellers/:sellerId/products", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error al cargar productos" });
   }
 });
+// ================= Pedidos de un seller (seguro) =================
+app.get("/sellers/:sellerId/orders", authenticate, async (req, res) => {
+  try {
+    const sellerId = Number(req.params.sellerId);
+    if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
+
+    // Seguridad: evita que un seller vea pedidos de otro
+    if (sellerId !== req.user.id) {
+      return res.status(403).json({ error: "No puedes ver pedidos de otro seller" });
+    }
+
+    // Traer solo los pedidos que pertenecen a este seller
+    const r = await pool.query(
+      "SELECT * FROM orders WHERE seller_id=$1 ORDER BY id DESC",
+      [sellerId]
+    );
+
+    res.json(r.rows);
+  } catch (err) {
+    console.error("Error en /sellers/:id/orders:", err);
+    res.status(500).json({ error: "Error al cargar pedidos" });
+  }
+});
 
 // ================= CARRITO =================
 app.get("/api/cart/:userId", async (req, res) => {
