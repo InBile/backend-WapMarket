@@ -9,7 +9,7 @@ const fs = require("fs");
 
 
 const FormData = require("form-data");
-console.log("ImgBB response:", data);
+
 
 
 const app = express();
@@ -92,27 +92,25 @@ const parsePrice = (raw) => {
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
     const { title, price_xaf, stock } = req.body;
-
-    const name = title;
-    const price = parsePrice(price_xaf);
-
     let imageUrl = null;
 
     if (req.file) {
       const filePath = req.file.path;
 
-      // Crear form-data
       const formData = new FormData();
       formData.append("key", process.env.IMGBB_API_KEY);
       formData.append("image", fs.createReadStream(filePath));
 
-      // 👇 aquí sí se puede usar await porque estamos dentro de una función async
       const response = await fetch("https://api.imgbb.com/1/upload", {
         method: "POST",
         body: formData,
       });
 
       const data = await response.json();
+
+      // 👇 Aquí dentro, justo después de obtener la respuesta
+      console.log("ImgBB response:", data);
+
       if (data.success) {
         imageUrl = data.data.url;
       }
@@ -121,20 +119,18 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO products (name, price, stock, image_url) 
+      `INSERT INTO products (title, price_xaf, stock, image_url) 
        VALUES ($1, $2, $3, $4) 
        RETURNING *`,
-      [name, price, stock, imageUrl]
+      [title, price_xaf, stock, imageUrl]
     );
 
     res.json(result.rows[0]);
   } catch (err) {
     console.error("Error en /products:", err);
-    res.status(500).json({ error: "Error al crear el producto" });
+    res.status(500).json({ error: "Error al crear producto" });
   }
 });
-
-
 
 
 // ================= DB INIT + PARCHEO SEGURO =================
