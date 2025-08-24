@@ -400,37 +400,55 @@ app.get("/products/:id/image", async (req, res) => {
  * POST /products (público: tu seller.html ya llama aquí)
  * Sube archivo a Supabase Storage y guarda image_url en DB.
  */
-app.post("/products", authenticate, upload.single("image_file"), async (req, res) => {
+app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
-    const sellerId = req.user.id;          // seller autenticado
-    const storeId = req.user.store_id;     // tienda asignada al seller
-    const { name, price, stock, category } = req.body;
+    const { name, price, stock, category, store_id, seller_id } = req.body;
 
-    // subir imagen si viene
-    let imageUrl = null;
-    if (req.file) {
-      const fileName = `prod_${Date.now()}_${req.file.originalname}`;
-      const { data, error } = await supabase.storage
-        .from(SUPABASE_BUCKET)
-        .upload(fileName, req.file.buffer, { contentType: req.file.mimetype });
-
-      if (error) throw error;
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${fileName}`;
+    if (!name || !price) {
+      return res.status(400).json({ error: "name y price son obligatorios" });
     }
 
-    const r = await pool.query(
-      `INSERT INTO products (name, price, stock, category, store_id, seller_id, image_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [name, price, stock, category, storeId, sellerId, imageUrl]
+    let publicUrl = null;
+
+    if (req.file) {
+      // nombre único
+      const ext = req.file.originalname.split(".").pop();
+      const fileName = `product_${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .upload(fileName, req.file.buffer, {
+          contentType: req.file.mimetype,
+        });
+
+      if (uploadError) throw uploadError;
+
+      // url pública
+      const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(fileName);
+      publicUrl = data.publicUrl;
+    }
+
+    const insert = await pool.query(
+      `INSERT INTO products (name, price, stock, category, store_id, seller_id, active, created_at, image_url)
+       VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7)
+       RETURNING *`,
+      [
+        name,
+        Number(price),
+        Number(stock || 0),
+        category || null,
+        store_id || null,
+        seller_id || null,
+        publicUrl,
+      ]
     );
 
-    res.json(mapProduct(r.rows[0]));
+    res.json(insert.rows[0]);
   } catch (err) {
-    console.error("Error creando producto:", err);
-    res.status(500).json({ error: "Error creando producto" });
+    console.error("Error en /products:", err);
+    res.status(500).json({ error: "Error al crear el producto" });
   }
 });
-
 
 
 // ================= PRODUCTOS (admin) =================
