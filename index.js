@@ -360,22 +360,44 @@ app.get("/api/negocios", async (_req, res) => res.json({ stores: await loadStore
 
 // ================= PRODUCTOS (públicos) =================
 app.get("/api/products", async (req, res) => {
-  const { store_id } = req.query;
-  let sql = "SELECT * FROM products";
-  const params = [];
-  if (store_id) {
-    sql += " WHERE store_id=$1";
-    params.push(store_id);
+  try {
+    const { store_id } = req.query;
+
+    let sql = `
+      SELECT p.*, s.name AS store_name, u.name AS seller_name
+      FROM products p
+      LEFT JOIN stores s ON s.id = p.store_id
+      LEFT JOIN users u ON u.id = p.seller_id
+    `;
+    const params = [];
+
+    if (store_id) {
+      sql += " WHERE p.store_id=$1";
+      params.push(store_id);
+    }
+
+    sql += " ORDER BY p.id DESC";
+
+    const result = await pool.query(sql, params);
+    res.json({ products: result.rows.map(mapProduct) });
+  } catch (err) {
+    console.error("Error en GET /api/products:", err);
+    res.status(500).json({ error: "Error al cargar productos" });
   }
-  sql += " ORDER BY id DESC";
-  const result = await pool.query(sql, params);
-  res.json({ products: result.rows.map(mapProduct) });
 });
 
 app.get("/api/products/:id", async (req, res) => {
-  const result = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
-  if (!result.rows.length) return res.status(404).json({ error: "Not found" });
-  res.json(mapProduct(result.rows[0]));
+  try {
+    const result = await pool.query(
+      "SELECT * FROM products WHERE id=$1",
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Not found" });
+    res.json(mapProduct(result.rows[0]));
+  } catch (err) {
+    console.error("Error en GET /api/products/:id:", err);
+    res.status(500).json({ error: "Error al cargar producto" });
+  }
 });
 
 /**
@@ -385,7 +407,10 @@ app.get("/api/products/:id", async (req, res) => {
 app.get("/products/:id/image", async (req, res) => {
   try {
     const { id } = req.params;
-    const q = await pool.query(`SELECT image_url FROM products WHERE id = $1`, [id]);
+    const q = await pool.query(
+      `SELECT image_url FROM products WHERE id = $1`,
+      [id]
+    );
     if (!q.rows.length || !q.rows[0].image_url) {
       return res.status(404).send("Imagen no encontrada");
     }
@@ -397,19 +422,23 @@ app.get("/products/:id/image", async (req, res) => {
 });
 
 /**
- * POST /products (público: tu seller.html ya llama aquí)
+ * POST /products (solo sellers autenticados)
  * Sube archivo a Supabase Storage y guarda image_url en DB.
  */
-app.post("/products", upload.single("image_file"), async (req, res) => {
+app.post("/products", authenticate, upload.single("image_file"), async (req, res) => {
   try {
-    const { name, price, stock, category, store_id, seller_id } = req.body;
+    const { name, price, stock, category } = req.body;
+    const sellerId = req.user?.id;        // del JWT
+    const storeId = req.user?.store_id;   // del JWT o relación en BD
 
     if (!name || !price) {
       return res.status(400).json({ error: "name y price son obligatorios" });
     }
+    if (!sellerId || !storeId) {
+      return res.status(400).json({ error: "No se pudo determinar el seller o la tienda" });
+    }
 
     let publicUrl = null;
-
     if (req.file) {
       // nombre único
       const ext = req.file.originalname.split(".").pop();
@@ -424,7 +453,9 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
       if (uploadError) throw uploadError;
 
       // url pública
-      const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(fileName);
+      const { data } = supabase.storage
+        .from(SUPABASE_BUCKET)
+        .getPublicUrl(fileName);
       publicUrl = data.publicUrl;
     }
 
@@ -437,15 +468,15 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
         Number(price),
         Number(stock || 0),
         category || null,
-        store_id || null,
-        seller_id || null,
+        storeId,
+        sellerId,
         publicUrl,
       ]
     );
 
     res.json(insert.rows[0]);
   } catch (err) {
-    console.error("Error en /products:", err);
+    console.error("Error en POST /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
