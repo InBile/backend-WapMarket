@@ -114,11 +114,23 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     const imageMime  = req.file ? req.file.mimetype : null;
 
     const insert = await pool.query(
-      `INSERT INTO products (name, price, stock, image_bytes, image_mime, category, store_id, seller_id, active, create_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,NOW())
-       RETURNING id, name, price, stock, category, store_id, seller_id, active, create_at`,
-      [name, Number(price), Number(stock || 0), imageBytes, imageMime, category || null, store_id || null, seller_id || null]
-    );
+  `INSERT INTO products (
+    name, price, stock, category, store_id, seller_id, active, create_at, image_bytes, image_mime
+  )
+   VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7,$8)
+   RETURNING id, name, price, stock, category, store_id, seller_id, active, create_at`,
+  [
+    name,
+    Number(price),
+    Number(stock || 0),
+    category || null,
+    store_id || null,
+    seller_id || null,
+    imageBytes,
+    imageMime,
+  ]
+);
+
 
     const product = insert.rows[0];
 
