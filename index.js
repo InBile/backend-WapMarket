@@ -9,7 +9,6 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const { createClient } = require("@supabase/supabase-js");
 
-const jwt from "jsonwebtoken";
 
 // Middleware para verificar token y adjuntar usuario
 function authenticate(req, res, next) {
