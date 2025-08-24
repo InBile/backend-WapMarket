@@ -31,10 +31,20 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "product-images";
 
 // ================= MULTER =================
+
 const upload = multer({
-  storage: multer.memoryStorage(), // Guardamos en memoria (no en disco)
-  limits: { fileSize: 2 * 1024 * 1024 }, // Máx. 2MB
+  storage: multer.memoryStorage(), // guarda en RAM, no en disco
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB máximo
+  fileFilter: (req, file, cb) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Formato de imagen no permitido. Solo JPG, PNG o WEBP."));
+    }
+  },
 });
+
 
 
 
