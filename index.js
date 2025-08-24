@@ -579,28 +579,26 @@ app.get("/sellers/:sellerId/products", authenticate, async (req, res) => {
   }
 });
 // ================= Pedidos de un seller (seguro) =================
-app.get("/sellers/:sellerId/orders", authenticate, async (req, res) => {
+app.get("/sellers/:id/orders", async (req, res) => {
+  const sellerId = Number(req.params.id);
   try {
-    const sellerId = Number(req.params.sellerId);
-    if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
-
-    // Seguridad: evita que un seller vea pedidos de otro
-    if (sellerId !== req.user.id) {
-      return res.status(403).json({ error: "No puedes ver pedidos de otro seller" });
-    }
-
-    // Traer solo los pedidos que pertenecen a este seller
-    const r = await pool.query(
-      "SELECT * FROM orders WHERE seller_id=$1 ORDER BY id DESC",
-      [sellerId]
-    );
-
+    const r = await pool.query(`
+      SELECT o.*, u.name AS customer_name
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      JOIN products p ON p.id = oi.product_id
+      JOIN users u ON u.id = o.user_id
+      WHERE p.seller_id = $1
+      GROUP BY o.id, u.name
+      ORDER BY o.created_at DESC
+    `, [sellerId]);
     res.json(r.rows);
   } catch (err) {
     console.error("Error en /sellers/:id/orders:", err);
     res.status(500).json({ error: "Error al cargar pedidos" });
   }
 });
+
 
 // ================= CARRITO =================
 app.get("/api/cart/:userId", async (req, res) => {
