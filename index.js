@@ -87,7 +87,6 @@ const parsePrice = (raw) => {
   return Number.isFinite(n) ? n : null;
 };
 // ================= RUTA: Crear producto =================
-// ================= RUTA: Crear producto =================
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
     const { title, price_xaf, stock } = req.body;
@@ -100,12 +99,12 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     if (req.file) {
       const filePath = req.file.path;
 
-      // Crear form-data para ImgBB
+      // Crear form-data
       const formData = new FormData();
-      formData.append("key", process.env.IMGBB_API_KEY); // 👈 tu API KEY
+      formData.append("key", process.env.IMGBB_API_KEY);
       formData.append("image", fs.createReadStream(filePath));
 
-      // Subir a ImgBB
+      // 👇 aquí sí se puede usar await porque estamos dentro de una función async
       const response = await fetch("https://api.imgbb.com/1/upload", {
         method: "POST",
         body: formData,
@@ -113,14 +112,12 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
 
       const data = await response.json();
       if (data.success) {
-        imageUrl = data.data.url; // URL pública de la imagen
+        imageUrl = data.data.url;
       }
 
-      // Eliminar archivo temporal
       fs.unlinkSync(filePath);
     }
 
-    // Guardar en la DB
     const result = await pool.query(
       `INSERT INTO products (name, price, stock, image_url) 
        VALUES ($1, $2, $3, $4) 
@@ -134,6 +131,7 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
+
 
 
 
