@@ -115,10 +115,10 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
 
     const insert = await pool.query(
   `INSERT INTO products (
-    name, price, stock, category, store_id, seller_id, active, create_at, image_bytes, image_mime
+    name, price, stock, category, store_id, seller_id, active, created_at, image_bytes, image_mime
   )
    VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7,$8)
-   RETURNING id, name, price, stock, category, store_id, seller_id, active, create_at`,
+   RETURNING id, name, price, stock, category, store_id, seller_id, active, created_at`,
   [
     name,
     Number(price),
