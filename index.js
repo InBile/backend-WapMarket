@@ -30,7 +30,13 @@ const storage = multer.diskStorage({
     cb(null, uniqueSuffix + path.extname(file.originalname));
   },
 });
-const upload = multer({ storage });
+// ⬇️ Sustituye tu configuración actual de multer por esta
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }, // tope duro 2MB
+});
+const BASE_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+
 
 // Servir imágenes estáticas (para acceder desde frontend)
 app.use("/uploads", express.static(uploadDir));
@@ -92,43 +98,64 @@ const parsePrice = (raw) => {
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
     const { name, price, stock, category, store_id, seller_id } = req.body;
-    let imageUrl = null;
 
-    if (req.file) {
-      const filePath = req.file.path;
-
-      const formData = new FormData();
-      formData.append("key", process.env.IMGBB_API_KEY);
-      formData.append("image", fs.createReadStream(filePath));
-
-      const response = await fetch("https://api.imgbb.com/1/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      const data = await response.json();
-      console.log("ImgBB response:", data);
-
-      if (data.success) {
-        imageUrl = data.data.url;
-      }
-
-      fs.unlinkSync(filePath);
+    // Validaciones mínimas
+    if (!name || !price) {
+      return res.status(400).json({ error: "name y price son obligatorios" });
     }
 
-    const result = await pool.query(
-      `INSERT INTO products (name, price, stock, image_url, category, store_id, seller_id, active, create_at) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW()) 
-       RETURNING *`,
-      [name, price, stock, imageUrl, category, store_id, seller_id]
+    // Regla de 500KB: si el cliente no comprimió, rechazamos (podemos luego añadir compresión servidor)
+    if (req.file && req.file.size > 500 * 1024) {
+      return res.status(413).json({ error: "La imagen debe ser ≤ 500KB" });
+    }
+
+    // Insert inicial (incluyendo el binario si llegó)
+    const imageBytes = req.file ? req.file.buffer : null;
+    const imageMime  = req.file ? req.file.mimetype : null;
+
+    const insert = await pool.query(
+      `INSERT INTO products (name, price, stock, image_bytes, image_mime, category, store_id, seller_id, active, create_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,NOW())
+       RETURNING id, name, price, stock, category, store_id, seller_id, active, create_at`,
+      [name, Number(price), Number(stock || 0), imageBytes, imageMime, category || null, store_id || null, seller_id || null]
     );
 
-    res.json(result.rows[0]);
+    const product = insert.rows[0];
+
+    // Construimos la URL interna para servir la imagen desde nuestra API
+    const imgUrl = imageBytes ? `${BASE_URL}/products/${product.id}/image` : null;
+
+    // Guardamos image_url para que tu frontend pueda usarlo tal cual
+    await pool.query(`UPDATE products SET image_url = $1 WHERE id = $2`, [imgUrl, product.id]);
+
+    // Devolvemos el producto ya con image_url
+    res.json({ ...product, image_url: imgUrl });
   } catch (err) {
     console.error("Error en /products:", err);
-    res.status(500).json({ error: "Error al crear producto" });
+    res.status(500).json({ error: "Error al crear el producto" });
   }
 });
+//================MOSTRAR IMAGENES========================
+app.get("/products/:id/image", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const q = await pool.query(
+      `SELECT image_bytes, image_mime FROM products WHERE id = $1`,
+      [id]
+    );
+
+    if (!q.rows.length || !q.rows[0].image_bytes) {
+      return res.status(404).send("Imagen no encontrada");
+    }
+
+    res.set("Content-Type", q.rows[0].image_mime || "application/octet-stream");
+    res.send(q.rows[0].image_bytes);
+  } catch (err) {
+    console.error("Error en GET /products/:id/image:", err);
+    res.status(500).send("Error al servir la imagen");
+  }
+});
+
 
 
 // ================= DB INIT + PARCHEO SEGURO =================
