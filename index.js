@@ -1,62 +1,37 @@
+// index.js (único archivo)
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
-
-
-const FormData = require("form-data");
-
-
-
-const app = express();
-
-// Crear carpeta uploads si no existe
-const uploadDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
-
-// Configuración de multer
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  },
-});
-// ⬇️ Sustituye tu configuración actual de multer por esta
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }, // tope duro 2MB
-});
-const BASE_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
-
-
-// Servir imágenes estáticas (para acceder desde frontend)
-app.use("/uploads", express.static(uploadDir));
-
-// Middlewares
-app.use(express.json());
-app.use(cors());
-
-// Exportar para usar en index.js
-module.exports = { app, upload, Pool };
+const { createClient } = require("@supabase/supabase-js");
 
 // ================= CONFIG =================
-const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
 const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || "clave-secreta-super-segura";
+
+// ================= EXPRESS =================
+const app = express();
+app.use(cors());
+app.use(express.json());
 
 // ================= POSTGRES =================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
+
+// ================= SUPABASE =================
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE; // SERVICE ROLE (solo backend)
+const supabase = createClient(supabaseUrl, supabaseKey);
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "product-images";
+
+// ================= MULTER (memoria) =================
+const upload = multer({ storage: multer.memoryStorage() });
 
 // ================= HELPERS =================
 const mapProduct = (p) => ({
@@ -70,8 +45,9 @@ const mapProduct = (p) => ({
   active: p.active ?? true,
   category: p.category || null,
   store_id: p.store_id || null,
+  seller_id: p.seller_id || null,
+  created_at: p.created_at,
 });
-
 const mapUser = (u) => ({
   id: u.id,
   email: u.email,
@@ -81,98 +57,19 @@ const mapUser = (u) => ({
   is_admin: !!u.is_admin,
   created_at: u.created_at,
 });
-
-// === Helpers de compatibilidad (alias + parseo de precio) ===
 const getFirst = (...vals) =>
   vals.find((v) => v !== undefined && v !== null && String(v).trim() !== "");
-
 const parsePrice = (raw) => {
   if (raw === undefined || raw === null) return null;
-  // Acepta números y strings tipo "2.500", "2,500", "2500 XAF"
   const cleaned = String(raw).replace(/[^0-9]/g, "");
   if (!cleaned) return null;
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;
 };
-// ================= RUTA: Crear producto =================
-app.post("/products", upload.single("image_file"), async (req, res) => {
-  try {
-    const { name, price, stock, category, store_id, seller_id } = req.body;
-
-    // Validaciones mínimas
-    if (!name || !price) {
-      return res.status(400).json({ error: "name y price son obligatorios" });
-    }
-
-    // Regla de 500KB: si el cliente no comprimió, rechazamos (podemos luego añadir compresión servidor)
-    if (req.file && req.file.size > 500 * 1024) {
-      return res.status(413).json({ error: "La imagen debe ser ≤ 500KB" });
-    }
-
-    // Insert inicial (incluyendo el binario si llegó)
-    const imageBytes = req.file ? req.file.buffer : null;
-    const imageMime  = req.file ? req.file.mimetype : null;
-
-   const insert = await pool.query(
-  `INSERT INTO products (
-    name, price, stock, category, store_id, seller_id, active, created_at, image_bytes, image_mime
-  )
-   VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7,$8)
-   RETURNING *`,
-  [
-    name,
-    Number(price),
-    Number(stock || 0),
-    category || null,
-    store_id ? Number(store_id) : null,  // 👈 aquí debe ser 1, 4 o 5
-    seller_id ? Number(seller_id) : null,
-    imageBytes,
-    imageMime,
-  ]
-);
-
-
-    const product = insert.rows[0];
-
-    // Construimos la URL interna para servir la imagen desde nuestra API
-    const imgUrl = imageBytes ? `${BASE_URL}/products/${product.id}/image` : null;
-
-    // Guardamos image_url para que tu frontend pueda usarlo tal cual
-    await pool.query(`UPDATE products SET image_url = $1 WHERE id = $2`, [imgUrl, product.id]);
-
-    // Devolvemos el producto ya con image_url
-    res.json({ ...product, image_url: imgUrl });
-  } catch (err) {
-    console.error("Error en /products:", err);
-    res.status(500).json({ error: "Error al crear el producto" });
-  }
-});
-//================MOSTRAR IMAGENES========================
-app.get("/products/:id/image", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const q = await pool.query(
-      `SELECT image_bytes, image_mime FROM products WHERE id = $1`,
-      [id]
-    );
-
-    if (!q.rows.length || !q.rows[0].image_bytes) {
-      return res.status(404).send("Imagen no encontrada");
-    }
-
-    res.set("Content-Type", q.rows[0].image_mime || "application/octet-stream");
-    res.send(q.rows[0].image_bytes);
-  } catch (err) {
-    console.error("Error en GET /products/:id/image:", err);
-    res.status(500).send("Error al servir la imagen");
-  }
-});
-
-
 
 // ================= DB INIT + PARCHEO SEGURO =================
 async function initDb() {
-  // Tablas base (no fallan si ya existen)
+  // Tablas base
   await pool.query(`
     -- ========= USERS =========
     CREATE TABLE IF NOT EXISTS users (
@@ -198,8 +95,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
-      price NUMERIC NOT NULL,
-      seller_user_id INT REFERENCES users(id) ON DELETE SET NULL
+      price NUMERIC NOT NULL
     );
 
     -- ========= CART =========
@@ -232,7 +128,7 @@ async function initDb() {
     );
   `);
 
-  // Columnas que podrían faltar (parche idempotente)
+  // Columnas que podrían faltar (idempotente)
   await pool.query(`
     -- stores
     ALTER TABLE stores
@@ -246,7 +142,8 @@ async function initDb() {
       ADD COLUMN IF NOT EXISTS stock INT DEFAULT 0,
       ADD COLUMN IF NOT EXISTS image_url TEXT,
       ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE,
-      ADD COLUMN IF NOT EXISTS category TEXT;
+      ADD COLUMN IF NOT EXISTS category TEXT,
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 
     -- índices
     CREATE INDEX IF NOT EXISTS idx_products_seller_id ON products(seller_id);
@@ -254,7 +151,7 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_stores_seller_user_id ON stores(seller_user_id);
   `);
 
-  // Migración suave: si alguna base antigua tiene stores.seller_id, copiar a seller_user_id
+  // Migraciones suaves de nombres antiguos (si existieran)
   await pool.query(`
     DO $$
     BEGIN
@@ -268,44 +165,32 @@ async function initDb() {
       END IF;
     END $$;
   `);
-
-  // Migración suave: si productos antiguos usan seller_user_id, copiar a seller_id
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'products' AND column_name = 'seller_user_id'
-      ) THEN
-        UPDATE products
-        SET seller_id = COALESCE(seller_id, seller_user_id)
-        WHERE seller_id IS NULL;
-      END IF;
-    END $$;
-  `);
 }
 initDb().catch(console.error);
 
 // ================= ADMIN POR DEFECTO =================
 async function createDefaultAdmin() {
-  const email = "admin@wapmarket.com";
-  const password = "naciel25091999"; // cámbialo luego
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
-  if (result.rows.length === 0) {
-    await pool.query(
-      "INSERT INTO users (email, password_hash, is_admin, role, name) VALUES ($1, $2, $3, $4, $5)",
-      [email, passwordHash, true, "admin", "Administrador"]
-    );
-    console.log(`✅ Admin creado: ${email} / ${password}`);
-  } else {
-    console.log("⚡ Admin ya existe, no se creó otro.");
+  try {
+    const email = "admin@wapmarket.com";
+    const password = "naciel25091999"; // cámbialo luego
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+    if (result.rows.length === 0) {
+      await pool.query(
+        "INSERT INTO users (email, password_hash, is_admin, role, name) VALUES ($1, $2, $3, $4, $5)",
+        [email, passwordHash, true, "admin", "Administrador"]
+      );
+      console.log(`✅ Admin creado: ${email} / ${password}`);
+    } else {
+      console.log("⚡ Admin ya existe, no se creó otro.");
+    }
+  } catch (e) {
+    console.error("No se pudo crear admin por defecto:", e.message);
   }
 }
 createDefaultAdmin().catch(console.error);
 
-// ================= MIDDLEWARE =================
+// ================= MIDDLEWARE AUTH =================
 function authMiddleware(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader) return res.status(401).json({ error: "No token provided" });
@@ -326,7 +211,6 @@ function requireRole(...roles) {
     return res.status(403).json({ error: "Not authorized" });
   };
 }
-// ================= MIDDLEWARE OPCIONAL =================
 function authMiddlewareOptional(req, _res, next) {
   const authHeader = req.headers["authorization"];
   if (authHeader) {
@@ -335,12 +219,11 @@ function authMiddlewareOptional(req, _res, next) {
       const decoded = jwt.verify(token, JWT_SECRET);
       req.user = decoded;
     } catch {
-      // Token inválido -> lo ignoramos (pedido de invitado)
+      // token inválido -> ignorar
     }
   }
   next();
 }
-
 
 // ================= AUTH =================
 async function handleRegister(req, res) {
@@ -388,7 +271,6 @@ app.get("/api/profile", authMiddleware, async (req, res) => {
 });
 
 // ================= STORES (NEGOCIOS) =================
-// Función común para listar stores con fallback si la columna cambia entre despliegues
 async function loadStoresRows() {
   try {
     const r = await pool.query(`
@@ -439,21 +321,12 @@ app.get("/api/stores", async (_req, res) => {
   }
 });
 
-// Aliases comunes por si el frontend usa otros paths
-app.get("/api/shops", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-app.get("/api/businesses", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
-app.get("/api/negocios", async (_req, res) => {
-  const rows = await loadStoresRows();
-  res.json({ stores: rows });
-});
+// Aliases
+app.get("/api/shops", async (_req, res) => res.json({ stores: await loadStoresRows() }));
+app.get("/api/businesses", async (_req, res) => res.json({ stores: await loadStoresRows() }));
+app.get("/api/negocios", async (_req, res) => res.json({ stores: await loadStoresRows() }));
 
-// ================= PRODUCTOS =================
+// ================= PRODUCTOS (públicos) =================
 app.get("/api/products", async (req, res) => {
   const { store_id } = req.query;
   let sql = "SELECT * FROM products";
@@ -469,11 +342,85 @@ app.get("/api/products", async (req, res) => {
 
 app.get("/api/products/:id", async (req, res) => {
   const result = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
-  if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
+  if (!result.rows.length) return res.status(404).json({ error: "Not found" });
   res.json(mapProduct(result.rows[0]));
 });
 
-// Admin crea/edita productos (acepta alias y parsea precio)
+/**
+ * Compat: GET /products/:id/image
+ * Ahora redirige a image_url (Supabase) si existe.
+ */
+app.get("/products/:id/image", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const q = await pool.query(`SELECT image_url FROM products WHERE id = $1`, [id]);
+    if (!q.rows.length || !q.rows[0].image_url) {
+      return res.status(404).send("Imagen no encontrada");
+    }
+    return res.redirect(q.rows[0].image_url);
+  } catch (err) {
+    console.error("Error en GET /products/:id/image:", err);
+    res.status(500).send("Error al servir la imagen");
+  }
+});
+
+/**
+ * POST /products (público: tu seller.html ya llama aquí)
+ * Sube archivo a Supabase Storage y guarda image_url en DB.
+ */
+app.post("/products", upload.single("image_file"), async (req, res) => {
+  try {
+    const { name, price, stock, category, store_id, seller_id } = req.body;
+
+    if (!name || !price) {
+      return res.status(400).json({ error: "name y price son obligatorios" });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "Falta image_file" });
+    }
+
+    // Subir a Supabase Storage
+    const file = req.file;
+    const filePath = `products/${Date.now()}-${file.originalname}`;
+    const { error: uploadError } = await supabase.storage
+      .from(SUPABASE_BUCKET)
+      .upload(filePath, file.buffer, { contentType: file.mimetype });
+
+    if (uploadError) throw uploadError;
+
+    // URL pública
+    const { data: publicUrlData } = supabase.storage
+      .from(SUPABASE_BUCKET)
+      .getPublicUrl(filePath);
+    const image_url = publicUrlData.publicUrl;
+
+    // Insert en productos (guardamos image_url)
+    const insert = await pool.query(
+      `INSERT INTO products (
+        name, price, stock, category, store_id, seller_id, image_url, active, created_at
+      )
+       VALUES ($1,$2,$3,$4,$5,$6,$7,true,NOW())
+       RETURNING *`,
+      [
+        name,
+        Number(price),
+        Number(stock || 0),
+        category || null,
+        store_id ? Number(store_id) : null,
+        seller_id ? Number(seller_id) : null,
+        image_url,
+      ]
+    );
+
+    const product = mapProduct(insert.rows[0]);
+    res.json(product);
+  } catch (err) {
+    console.error("Error en /products:", err);
+    res.status(500).json({ error: "Error al crear el producto" });
+  }
+});
+
+// ================= PRODUCTOS (admin) =================
 app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res) => {
   try {
     const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
@@ -501,7 +448,6 @@ app.post("/api/products", authMiddleware, requireRole("admin"), async (req, res)
 });
 
 app.put("/api/products/:id", authMiddleware, requireRole("admin"), async (req, res) => {
-  // También aceptamos alias en updates
   const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
   const priceParsed = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
   const stockParsed = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty));
@@ -548,7 +494,21 @@ app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req
   res.json({ message: "Deleted" });
 });
 
-// ================= CARRITO (compat) =================
+// ================= RUTA COMPAT para seller.html =================
+// Si tu frontend llama GET /sellers/:sellerId/products (público)
+app.get("/sellers/:sellerId/products", async (req, res) => {
+  try {
+    const sellerId = Number(req.params.sellerId);
+    if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
+    const r = await pool.query("SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC", [sellerId]);
+    res.json(r.rows.map(mapProduct));
+  } catch (err) {
+    console.error("Error en /sellers/:id/products:", err);
+    res.status(500).json({ error: "Error al cargar productos" });
+  }
+});
+
+// ================= CARRITO =================
 app.get("/api/cart/:userId", async (req, res) => {
   const result = await pool.query("SELECT * FROM cart WHERE user_id=$1", [req.params.userId]);
   res.json(result.rows);
@@ -569,7 +529,7 @@ app.delete("/api/cart/:userId/:productId", async (req, res) => {
   res.json(result.rows);
 });
 
-// ================= PEDIDOS (con invitado o usuario) =================
+// ================= PEDIDOS =================
 app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
   try {
     const userId = req.body.userId || req.user?.id || null;
@@ -609,10 +569,9 @@ app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
       const p = r.rows.find((x) => x.id === it.productId);
       const unit = p ? Number(p.price) : 0;
       await pool.query(
-        "INSERT INTO order_items (order_id, product_id, quantity, unit_price_xaf) VALUES ($1,$2,$3,$4)",
+        "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)",
         [order.id, it.productId, it.quantity, unit]
-    );
-
+      );
     }
 
     res.json({
@@ -631,7 +590,6 @@ app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
     res.status(500).json({ error: "No se pudo crear el pedido" });
   }
 });
-
 
 // ================= ADMIN =================
 app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
@@ -665,10 +623,8 @@ app.get("/api/seller/products", authMiddleware, requireRole("seller"), async (re
   res.json({ products: r.rows.map(mapProduct) });
 });
 
-// Vendedor crea producto (acepta alias, parsea precio y autocrea tienda si falta)
 app.post("/api/seller/products", authMiddleware, requireRole("seller"), async (req, res) => {
   try {
-    // Alias del frontend y parseo robusto
     const name = getFirst(req.body.name, req.body.title, req.body.productName, req.body.nombre);
     const price = parsePrice(getFirst(req.body.price, req.body.price_xaf, req.body.productPrice, req.body.precio));
     const stock = parsePrice(getFirst(req.body.stock, req.body.quantity, req.body.qty)) ?? 0;
@@ -768,6 +724,7 @@ app.put("/api/seller/orders/:id/status", authMiddleware, requireRole("seller"), 
   res.json({ message: "Estado actualizado" });
 });
 
-// ================= START =================
-app.get("/", (_req, res) => res.send("✅ API WapMarket funcionando"));
+// ================= ROOT =================
+app.get("/", (_req, res) => res.send("✅ API WapMarket funcionando con Supabase Storage"));
+
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
