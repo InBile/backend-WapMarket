@@ -625,66 +625,57 @@ app.delete("/api/cart/:userId/:productId", async (req, res) => {
 });
 
 // ================= PEDIDOS =================
-app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
+app.post("/api/orders", authenticate, async (req, res) => {
   try {
-    const userId = req.body.userId || req.user?.id || null;
-    const itemsRaw = req.body.items || [];
-    const items = itemsRaw
-      .map((i) => ({
-        productId: i.productId || i.product_id,
-        quantity: i.quantity || i.qty,
-      }))
-      .filter((i) => i.productId && i.quantity > 0);
+    const { items, fulfillment_type, guest_name, guest_phone, address } = req.body;
 
-    const fulfillment_type = req.body.fulfillment_type || "pickup";
-    const guest_name = req.body.guest_name || null;
-    const guest_phone = req.body.guest_phone || null;
-    const address = req.body.address || null;
-
-    if (!items.length) return res.status(400).json({ error: "Empty items" });
-
-    const productIds = items.map((i) => i.productId);
-    const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
-
-    let subtotal = 0;
-    for (const it of items) {
-      const p = r.rows.find((x) => x.id === it.productId);
-      if (p) subtotal += Number(p.price) * it.quantity;
+    if (!items || !items.length) {
+      return res.status(400).json({ error: "Carrito vacío" });
     }
-    const delivery = fulfillment_type === "delivery" ? 2000 : 0;
-    const total = subtotal + delivery;
 
-    const orderResult = await pool.query(
-      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
+    // 1) Crear pedido
+    const orderRes = await pool.query(
+      `INSERT INTO orders (user_id, fulfillment_type, guest_name, guest_phone, address, status, created_at, total_xaf)
+       VALUES ($1,$2,$3,$4,$5,'pendiente',NOW(),0)
+       RETURNING *`,
+      [req.user?.id || null, fulfillment_type, guest_name, guest_phone, address]
     );
-    const order = orderResult.rows[0];
 
+    const order = orderRes.rows[0];
+    let total = 0;
+
+    // 2) Insertar items y calcular total
     for (const it of items) {
-      const p = r.rows.find((x) => x.id === it.productId);
-      const unit = p ? Number(p.price) : 0;
+      // traer producto
+      const productRes = await pool.query(
+        `SELECT id, price, seller_id FROM products WHERE id=$1`,
+        [it.productId]
+      );
+      if (!productRes.rows.length) continue;
+
+      const product = productRes.rows[0];
+      const subtotal = Number(product.price) * Number(it.quantity);
+      total += subtotal;
+
+      // insertar item con seller_id
       await pool.query(
-        "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)",
-        [order.id, it.productId, it.quantity, unit]
+        `INSERT INTO order_items (order_id, product_id, quantity, price_xaf, seller_id)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [order.id, product.id, it.quantity, product.price, product.seller_id]
       );
     }
 
-    res.json({
-      success: true,
-      order_id: order.id,
-      order: {
-        id: order.id,
-        total_xaf: Number(order.total),
-        status: order.status,
-        fulfillment_type: order.fulfillment_type,
-        created_at: order.created_at,
-      },
-    });
+    // 3) actualizar total del pedido
+    await pool.query(`UPDATE orders SET total_xaf=$1 WHERE id=$2`, [total, order.id]);
+    order.total_xaf = total;
+
+    res.json({ order });
   } catch (err) {
-    console.error("Error creando pedido:", err);
-    res.status(500).json({ error: "No se pudo crear el pedido" });
+    console.error("Error en POST /orders:", err);
+    res.status(500).json({ error: "Error creando pedido" });
   }
 });
+
 
 // ================= ADMIN =================
 app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
