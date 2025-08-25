@@ -9,8 +9,8 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const { createClient } = require("@supabase/supabase-js");
 const sequelize = require("./db");
-const WapCard = require("./models/WapCard");
-const Transaction = require("./models/Transaction");
+const WapCard = require("./WapCard");
+const Transaction = require("./Transaction");
 
 // Sincronizar modelos con la base de datos
 sequelize.sync({ alter: true })
