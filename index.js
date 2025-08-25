@@ -8,6 +8,14 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const multer = require("multer");
 const { createClient } = require("@supabase/supabase-js");
+const sequelize = require("./db");
+const WapCard = require("./models/WapCard");
+const Transaction = require("./models/Transaction");
+
+// Sincronizar modelos con la base de datos
+sequelize.sync({ alter: true })
+  .then(() => console.log("📦 Tablas sincronizadas en Postgres"))
+  .catch(err => console.error("Error sync:", err));
 
 
 // Middleware para verificar token y adjuntar usuario
