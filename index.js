@@ -61,6 +61,29 @@ const upload = multer({
     }
   },
 });
+// ====== WapCard Model ======
+const mongoose = require("mongoose");
+
+const wapCardSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  cardCode: { type: String, unique: true, required: true },
+  balance: { type: Number, default: 0 },
+  role: { type: String, enum: ["client", "seller", "admin"], default: "client" }
+});
+
+const WapCard = mongoose.model("WapCard", wapCardSchema);
+
+// ====== Utilidad para generar código de tarjeta ======
+function generateWapCode() {
+  const randomPart = () =>
+    Math.random().toString().slice(2, 6).padEnd(4, "0").substring(0, 4);
+  return `WAP-${randomPart()}-${randomPart()}-${randomPart().slice(
+    0,
+    4
+  )}-${Math.floor(Math.random() * 9)}-${Math.floor(
+    10 + Math.random() * 89
+  )}`;
+}
 
 
 
@@ -301,6 +324,28 @@ app.get("/api/profile", authMiddleware, async (req, res) => {
   const result = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
   res.json(mapUser(result.rows[0]));
 });
+// Crear WapCard al registrar usuario
+app.post("/create-wapcard/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // si ya existe no crear otra
+    let existing = await WapCard.findOne({ userId });
+    if (existing) return res.json(existing);
+
+    const newCard = new WapCard({
+      userId,
+      cardCode: generateWapCode(),
+      balance: 0
+    });
+
+    await newCard.save();
+    res.json(newCard);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ================= STORES (NEGOCIOS) =================
 // antes: function loadStoresRows() {
@@ -654,6 +699,94 @@ app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
     res.status(500).json({ error: "No se pudo crear el pedido" });
   }
 });
+// Recarga de WapCard (solo Admin)
+app.post("/admin/recharge", async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+
+    let card = await WapCard.findOne({ userId });
+    if (!card) return res.status(404).json({ error: "WapCard no encontrada" });
+
+    card.balance += Number(amount);
+    await card.save();
+
+    res.json({ message: "Recarga exitosa", card });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// Pagar pedido con WapCard
+app.post("/pay-order", async (req, res) => {
+  try {
+    const { buyerId, sellerId, amount, delivery } = req.body;
+    // amount = precio de la compra SIN envío
+    // delivery = costo de envío (si aplica)
+
+    let buyerCard = await WapCard.findOne({ userId: buyerId });
+    let sellerCard = await WapCard.findOne({ userId: sellerId });
+    let adminCard = await WapCard.findOne({ role: "admin" });
+
+    if (!buyerCard || !sellerCard || !adminCard)
+      return res.status(404).json({ error: "Tarjeta no encontrada" });
+
+    const totalToPay = amount + delivery + 2000;
+    if (buyerCard.balance < totalToPay)
+      return res.status(400).json({ error: "Fondos insuficientes" });
+
+    // Descontar al comprador
+    buyerCard.balance -= totalToPay;
+
+    // Calcular comisiones
+    const sellerNet = amount * 0.99; // 1% comisión
+    const adminCommission = amount * 0.02 + 2000; // 2% + envío fijo
+
+    sellerCard.balance += sellerNet;
+    adminCard.balance += adminCommission;
+
+    await buyerCard.save();
+    await sellerCard.save();
+    await adminCard.save();
+
+    res.json({
+      message: "Pago exitoso",
+      buyerBalance: buyerCard.balance,
+      sellerBalance: sellerCard.balance
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// Retiro de fondos por parte del Seller
+app.post("/seller/withdraw", async (req, res) => {
+  try {
+    const { sellerId, amount } = req.body;
+
+    let sellerCard = await WapCard.findOne({ userId: sellerId });
+    if (!sellerCard) return res.status(404).json({ error: "Tarjeta no encontrada" });
+
+    if (sellerCard.balance < amount)
+      return res.status(400).json({ error: "Fondos insuficientes" });
+
+    sellerCard.balance -= amount;
+    await sellerCard.save();
+
+    res.json({ message: "Retiro exitoso", newBalance: sellerCard.balance });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// Consultar saldo de una WapCard
+app.get("/card/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const card = await WapCard.findOne({ userId });
+    if (!card) return res.status(404).json({ error: "No existe la WapCard" });
+    res.json(card);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ================= ADMIN =================
 app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
