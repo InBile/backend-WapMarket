@@ -303,18 +303,14 @@ app.get("/api/profile", authMiddleware, async (req, res) => {
 });
 
 // ================= STORES (NEGOCIOS) =================
+// antes: function loadStoresRows() {
 async function loadStoresRows() {
   try {
     const r = await pool.query(`
       SELECT 
-        s.id, 
-        s.name, 
-        s.seller_user_id, 
-        s.active,
-        s.created_at, 
-        u.name as seller_name, 
-        u.email as seller_email,
-        COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
+        s.id, s.name, s.seller_user_id, s.active, s.created_at,
+        u.name as seller_name, u.email as seller_email,
+        COALESCE((SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
       FROM stores s 
       LEFT JOIN users u ON u.id = s.seller_user_id
       ORDER BY s.id DESC
@@ -322,17 +318,11 @@ async function loadStoresRows() {
     return r.rows;
   } catch (e) {
     if (e && e.code === "42703") {
-      // Fallback para esquemas viejos con seller_id
       const r2 = await pool.query(`
         SELECT 
-          s.id, 
-          s.name, 
-          s.seller_id AS seller_user_id, 
-          s.active,
-          s.created_at, 
-          u.name as seller_name, 
-          u.email as seller_email,
-          COALESCE( (SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
+          s.id, s.name, s.seller_id AS seller_user_id, s.active, s.created_at,
+          u.name as seller_name, u.email as seller_email,
+          COALESCE((SELECT COUNT(*)::int FROM products p WHERE p.store_id = s.id), 0) as product_count
         FROM stores s 
         LEFT JOIN users u ON u.id = s.seller_id
         ORDER BY s.id DESC
@@ -342,6 +332,7 @@ async function loadStoresRows() {
     throw e;
   }
 }
+
 
 app.get("/api/stores", async (_req, res) => {
   try {
