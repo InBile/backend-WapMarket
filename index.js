@@ -391,56 +391,55 @@ app.get("/products/:id/image", async (req, res) => {
  * POST /products (público: tu seller.html ya llama aquí)
  * Sube archivo a Supabase Storage y guarda image_url en DB.
  */
-// ================== CREAR PRODUCTO ==================
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
-    console.log("📥 Body recibido:", req.body);
-    console.log("📂 Archivo recibido:", req.file);
-
     const { name, price, stock, category, store_id, seller_id } = req.body;
+
+    if (!name || !price) {
+      return res.status(400).json({ error: "name y price son obligatorios" });
+    }
+
     let publicUrl = null;
 
     if (req.file) {
+      // nombre único
       const ext = req.file.originalname.split(".").pop();
       const fileName = `product_${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
-
-      console.log("⬆️ Subiendo a Supabase:", fileName);
 
       const { error: uploadError } = await supabase.storage
         .from(SUPABASE_BUCKET)
         .upload(fileName, req.file.buffer, {
           contentType: req.file.mimetype,
-          upsert: true,
         });
 
-      if (uploadError) {
-        console.error("❌ Error al subir a Supabase:", uploadError);
-        throw uploadError;
-      }
+      if (uploadError) throw uploadError;
 
+      // url pública
       const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(fileName);
-      publicUrl = data?.publicUrl || null;
-
-      console.log("✅ URL pública generada:", publicUrl);
+      publicUrl = data.publicUrl;
     }
 
     const insert = await pool.query(
       `INSERT INTO products (name, price, stock, category, store_id, seller_id, active, created_at, image_url)
        VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7)
        RETURNING *`,
-      [name, Number(price), Number(stock||0), category||null, store_id||null, seller_id||null, publicUrl]
+      [
+        name,
+        Number(price),
+        Number(stock || 0),
+        category || null,
+        store_id || null,
+        seller_id || null,
+        publicUrl,
+      ]
     );
-
-    console.log("💾 Producto guardado:", insert.rows[0]);
 
     res.json(insert.rows[0]);
   } catch (err) {
-    console.error("🔥 Error en /products:", err);
+    console.error("Error en /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
-
-
 
 
 // ================= PRODUCTOS (admin) =================
