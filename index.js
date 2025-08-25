@@ -793,7 +793,49 @@ app.get("/card/:userId", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});app.post("/pay-order", async (req, res) => {
+  const { buyerId, sellerId, amount, delivery } = req.body;
+
+  try {
+    const buyerCard = await WapCard.findByPk(buyerId);
+    const sellerCard = await WapCard.findByPk(sellerId);
+    const adminCard = await WapCard.findOne({ where: { role: "admin" } });
+
+    if (!buyerCard || !sellerCard || !adminCard) {
+      return res.status(404).json({ error: "Tarjeta no encontrada" });
+    }
+
+    const totalToPay = amount + delivery + 2000;
+    if (buyerCard.balance < totalToPay) {
+      return res.status(400).json({ error: "Fondos insuficientes" });
+    }
+
+    // Actualizar balances
+    buyerCard.balance -= totalToPay;
+    const sellerNet = Math.floor(amount * 0.99);
+    const adminCommission = Math.floor(amount * 0.02) + 2000;
+
+    sellerCard.balance += sellerNet;
+    adminCard.balance += adminCommission;
+
+    await buyerCard.save();
+    await sellerCard.save();
+    await adminCard.save();
+
+    // Guardar transacción
+    await Transaction.create({
+      type: "payment",
+      amount: totalToPay,
+      details: { subtotal: amount, delivery, sellerNet, adminCommission }
+    });
+
+    res.json({ message: "Pago exitoso", buyerBalance: buyerCard.balance });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
+
 
 
 // ================= ADMIN =================
