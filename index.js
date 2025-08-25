@@ -69,17 +69,7 @@ const upload = multer({
     }
   },
 });
-// ====== WapCard Model ======
-const mongoose = require("mongoose");
 
-const wapCardSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-  cardCode: { type: String, unique: true, required: true },
-  balance: { type: Number, default: 0 },
-  role: { type: String, enum: ["client", "seller", "admin"], default: "client" }
-});
-
-const WapCard = mongoose.model("WapCard", wapCardSchema);
 
 // ====== Utilidad para generar código de tarjeta ======
 function generateWapCode() {
