@@ -557,15 +557,10 @@ app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req
 });
 
 // ================= Productos de un seller (seguro) =================
-app.get("/sellers/:sellerId/products", authenticate, async (req, res) => {
+app.get("/sellers/:sellerId/products", async (req, res) => {
   try {
     const sellerId = Number(req.params.sellerId);
     if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
-
-    // Evita que un seller consulte productos de otro
-    if (sellerId !== req.user.id) {
-      return res.status(403).json({ error: "No puedes ver productos de otro seller" });
-    }
 
     const r = await pool.query(
       "SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC",
@@ -578,18 +573,25 @@ app.get("/sellers/:sellerId/products", authenticate, async (req, res) => {
     res.status(500).json({ error: "Error al cargar productos" });
   }
 });
+
 // ================= Pedidos de un seller (seguro) =================
-app.get("/sellers/:id/orders", async (req, res) => {
+app.get("/sellers/:id/orders", authenticate, async (req, res) => {
   const sellerId = Number(req.params.id);
+  if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
+
+  // seguridad: solo su dueño puede ver sus pedidos
+  if (sellerId !== req.user.id) {
+    return res.status(403).json({ error: "No autorizado" });
+  }
+
   try {
     const r = await pool.query(`
-      SELECT o.*, u.name AS customer_name
+      SELECT DISTINCT o.id, o.*, u.name AS customer_name
       FROM orders o
       JOIN order_items oi ON oi.order_id = o.id
       JOIN products p ON p.id = oi.product_id
       JOIN users u ON u.id = o.user_id
       WHERE p.seller_id = $1
-      GROUP BY o.id, u.name
       ORDER BY o.created_at DESC
     `, [sellerId]);
     res.json(r.rows);
@@ -598,6 +600,7 @@ app.get("/sellers/:id/orders", async (req, res) => {
     res.status(500).json({ error: "Error al cargar pedidos" });
   }
 });
+
 
 
 // ================= CARRITO =================
