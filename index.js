@@ -391,6 +391,7 @@ app.get("/products/:id/image", async (req, res) => {
  * POST /products (público: tu seller.html ya llama aquí)
  * Sube archivo a Supabase Storage y guarda image_url en DB.
  */
+// ================== CREAR PRODUCTO ==================
 app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
     const { name, price, stock, category, store_id, seller_id } = req.body;
@@ -406,21 +407,27 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
       const ext = req.file.originalname.split(".").pop();
       const fileName = `product_${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
 
+      // subir a Supabase
       const { error: uploadError } = await supabase.storage
         .from(SUPABASE_BUCKET)
         .upload(fileName, req.file.buffer, {
           contentType: req.file.mimetype,
+          upsert: true, // 👈 asegura sobreescritura si ya existe
         });
 
       if (uploadError) throw uploadError;
 
-      // url pública
+      // obtener URL pública
       const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(fileName);
-      publicUrl = data.publicUrl;
+      publicUrl = data?.publicUrl || null;
+
+      console.log("📸 Imagen subida:", fileName, "URL generada:", publicUrl);
     }
 
+    // insertar producto con image_url
     const insert = await pool.query(
-      `INSERT INTO products (name, price, stock, category, store_id, seller_id, active, created_at, image_url)
+      `INSERT INTO products 
+         (name, price, stock, category, store_id, seller_id, active, created_at, image_url)
        VALUES ($1,$2,$3,$4,$5,$6,true,NOW(),$7)
        RETURNING *`,
       [
@@ -430,16 +437,17 @@ app.post("/products", upload.single("image_file"), async (req, res) => {
         category || null,
         store_id || null,
         seller_id || null,
-        publicUrl,
+        publicUrl, // ✅ ahora ya no se queda null
       ]
     );
 
     res.json(insert.rows[0]);
   } catch (err) {
-    console.error("Error en /products:", err);
+    console.error("❌ Error en /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
+
 
 
 // ================= PRODUCTOS (admin) =================
