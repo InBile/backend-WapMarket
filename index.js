@@ -360,44 +360,22 @@ app.get("/api/negocios", async (_req, res) => res.json({ stores: await loadStore
 
 // ================= PRODUCTOS (públicos) =================
 app.get("/api/products", async (req, res) => {
-  try {
-    const { store_id } = req.query;
-
-    let sql = `
-      SELECT p.*, s.name AS store_name, u.name AS seller_name
-      FROM products p
-      LEFT JOIN stores s ON s.id = p.store_id
-      LEFT JOIN users u ON u.id = p.seller_id
-    `;
-    const params = [];
-
-    if (store_id) {
-      sql += " WHERE p.store_id=$1";
-      params.push(store_id);
-    }
-
-    sql += " ORDER BY p.id DESC";
-
-    const result = await pool.query(sql, params);
-    res.json({ products: result.rows.map(mapProduct) });
-  } catch (err) {
-    console.error("Error en GET /api/products:", err);
-    res.status(500).json({ error: "Error al cargar productos" });
+  const { store_id } = req.query;
+  let sql = "SELECT * FROM products";
+  const params = [];
+  if (store_id) {
+    sql += " WHERE store_id=$1";
+    params.push(store_id);
   }
+  sql += " ORDER BY id DESC";
+  const result = await pool.query(sql, params);
+  res.json({ products: result.rows.map(mapProduct) });
 });
 
 app.get("/api/products/:id", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM products WHERE id=$1",
-      [req.params.id]
-    );
-    if (!result.rows.length) return res.status(404).json({ error: "Not found" });
-    res.json(mapProduct(result.rows[0]));
-  } catch (err) {
-    console.error("Error en GET /api/products/:id:", err);
-    res.status(500).json({ error: "Error al cargar producto" });
-  }
+  const result = await pool.query("SELECT * FROM products WHERE id=$1", [req.params.id]);
+  if (!result.rows.length) return res.status(404).json({ error: "Not found" });
+  res.json(mapProduct(result.rows[0]));
 });
 
 /**
@@ -407,10 +385,7 @@ app.get("/api/products/:id", async (req, res) => {
 app.get("/products/:id/image", async (req, res) => {
   try {
     const { id } = req.params;
-    const q = await pool.query(
-      `SELECT image_url FROM products WHERE id = $1`,
-      [id]
-    );
+    const q = await pool.query(`SELECT image_url FROM products WHERE id = $1`, [id]);
     if (!q.rows.length || !q.rows[0].image_url) {
       return res.status(404).send("Imagen no encontrada");
     }
@@ -422,23 +397,19 @@ app.get("/products/:id/image", async (req, res) => {
 });
 
 /**
- * POST /products (solo sellers autenticados)
+ * POST /products (público: tu seller.html ya llama aquí)
  * Sube archivo a Supabase Storage y guarda image_url en DB.
  */
-app.post("/products", authenticate, upload.single("image_file"), async (req, res) => {
+app.post("/products", upload.single("image_file"), async (req, res) => {
   try {
-    const { name, price, stock, category } = req.body;
-    const sellerId = req.user?.id;        // del JWT
-    const storeId = req.user?.store_id;   // del JWT o relación en BD
+    const { name, price, stock, category, store_id, seller_id } = req.body;
 
     if (!name || !price) {
       return res.status(400).json({ error: "name y price son obligatorios" });
     }
-    if (!sellerId || !storeId) {
-      return res.status(400).json({ error: "No se pudo determinar el seller o la tienda" });
-    }
 
     let publicUrl = null;
+
     if (req.file) {
       // nombre único
       const ext = req.file.originalname.split(".").pop();
@@ -453,9 +424,7 @@ app.post("/products", authenticate, upload.single("image_file"), async (req, res
       if (uploadError) throw uploadError;
 
       // url pública
-      const { data } = supabase.storage
-        .from(SUPABASE_BUCKET)
-        .getPublicUrl(fileName);
+      const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(fileName);
       publicUrl = data.publicUrl;
     }
 
@@ -468,15 +437,15 @@ app.post("/products", authenticate, upload.single("image_file"), async (req, res
         Number(price),
         Number(stock || 0),
         category || null,
-        storeId,
-        sellerId,
+        store_id || null,
+        seller_id || null,
         publicUrl,
       ]
     );
 
     res.json(insert.rows[0]);
   } catch (err) {
-    console.error("Error en POST /products:", err);
+    console.error("Error en /products:", err);
     res.status(500).json({ error: "Error al crear el producto" });
   }
 });
@@ -557,10 +526,15 @@ app.delete("/api/products/:id", authMiddleware, requireRole("admin"), async (req
 });
 
 // ================= Productos de un seller (seguro) =================
-app.get("/sellers/:sellerId/products", async (req, res) => {
+app.get("/sellers/:sellerId/products", authenticate, async (req, res) => {
   try {
     const sellerId = Number(req.params.sellerId);
     if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
+
+    // Evita que un seller consulte productos de otro
+    if (sellerId !== req.user.id) {
+      return res.status(403).json({ error: "No puedes ver productos de otro seller" });
+    }
 
     const r = await pool.query(
       "SELECT * FROM products WHERE seller_id=$1 ORDER BY id DESC",
@@ -573,35 +547,29 @@ app.get("/sellers/:sellerId/products", async (req, res) => {
     res.status(500).json({ error: "Error al cargar productos" });
   }
 });
-
 // ================= Pedidos de un seller (seguro) =================
-app.get("/sellers/:id/orders", authenticate, async (req, res) => {
-  const sellerId = Number(req.params.id);
-  if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
-
-  // seguridad: solo su dueño puede ver sus pedidos
-  if (sellerId !== req.user.id) {
-    return res.status(403).json({ error: "No autorizado" });
-  }
-
+app.get("/sellers/:sellerId/orders", authenticate, async (req, res) => {
   try {
-    const r = await pool.query(`
-      SELECT DISTINCT o.id, o.*, u.name AS customer_name
-      FROM orders o
-      JOIN order_items oi ON oi.order_id = o.id
-      JOIN products p ON p.id = oi.product_id
-      JOIN users u ON u.id = o.user_id
-      WHERE p.seller_id = $1
-      ORDER BY o.created_at DESC
-    `, [sellerId]);
+    const sellerId = Number(req.params.sellerId);
+    if (!sellerId) return res.status(400).json({ error: "sellerId inválido" });
+
+    // Seguridad: evita que un seller vea pedidos de otro
+    if (sellerId !== req.user.id) {
+      return res.status(403).json({ error: "No puedes ver pedidos de otro seller" });
+    }
+
+    // Traer solo los pedidos que pertenecen a este seller
+    const r = await pool.query(
+      "SELECT * FROM orders WHERE seller_id=$1 ORDER BY id DESC",
+      [sellerId]
+    );
+
     res.json(r.rows);
   } catch (err) {
     console.error("Error en /sellers/:id/orders:", err);
     res.status(500).json({ error: "Error al cargar pedidos" });
   }
 });
-
-
 
 // ================= CARRITO =================
 app.get("/api/cart/:userId", async (req, res) => {
@@ -625,57 +593,66 @@ app.delete("/api/cart/:userId/:productId", async (req, res) => {
 });
 
 // ================= PEDIDOS =================
-app.post("/api/orders", authenticate, async (req, res) => {
+app.post("/api/orders", authMiddlewareOptional, async (req, res) => {
   try {
-    const { items, fulfillment_type, guest_name, guest_phone, address } = req.body;
+    const userId = req.body.userId || req.user?.id || null;
+    const itemsRaw = req.body.items || [];
+    const items = itemsRaw
+      .map((i) => ({
+        productId: i.productId || i.product_id,
+        quantity: i.quantity || i.qty,
+      }))
+      .filter((i) => i.productId && i.quantity > 0);
 
-    if (!items || !items.length) {
-      return res.status(400).json({ error: "Carrito vacío" });
-    }
+    const fulfillment_type = req.body.fulfillment_type || "pickup";
+    const guest_name = req.body.guest_name || null;
+    const guest_phone = req.body.guest_phone || null;
+    const address = req.body.address || null;
 
-    // 1) Crear pedido
-    const orderRes = await pool.query(
-      `INSERT INTO orders (user_id, fulfillment_type, guest_name, guest_phone, address, status, created_at, total_xaf)
-       VALUES ($1,$2,$3,$4,$5,'pendiente',NOW(),0)
-       RETURNING *`,
-      [req.user?.id || null, fulfillment_type, guest_name, guest_phone, address]
-    );
+    if (!items.length) return res.status(400).json({ error: "Empty items" });
 
-    const order = orderRes.rows[0];
-    let total = 0;
+    const productIds = items.map((i) => i.productId);
+    const r = await pool.query(`SELECT id, price FROM products WHERE id = ANY($1::int[])`, [productIds]);
 
-    // 2) Insertar items y calcular total
+    let subtotal = 0;
     for (const it of items) {
-      // traer producto
-      const productRes = await pool.query(
-        `SELECT id, price, seller_id FROM products WHERE id=$1`,
-        [it.productId]
-      );
-      if (!productRes.rows.length) continue;
+      const p = r.rows.find((x) => x.id === it.productId);
+      if (p) subtotal += Number(p.price) * it.quantity;
+    }
+    const delivery = fulfillment_type === "delivery" ? 2000 : 0;
+    const total = subtotal + delivery;
 
-      const product = productRes.rows[0];
-      const subtotal = Number(product.price) * Number(it.quantity);
-      total += subtotal;
+    const orderResult = await pool.query(
+      "INSERT INTO orders (user_id, total, status, fulfillment_type, guest_name, guest_phone, address) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+      [userId || null, total, "CREATED", fulfillment_type, guest_name, guest_phone, address]
+    );
+    const order = orderResult.rows[0];
 
-      // insertar item con seller_id
+    for (const it of items) {
+      const p = r.rows.find((x) => x.id === it.productId);
+      const unit = p ? Number(p.price) : 0;
       await pool.query(
-        `INSERT INTO order_items (order_id, product_id, quantity, price_xaf, seller_id)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [order.id, product.id, it.quantity, product.price, product.seller_id]
+        "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)",
+        [order.id, it.productId, it.quantity, unit]
       );
     }
 
-    // 3) actualizar total del pedido
-    await pool.query(`UPDATE orders SET total_xaf=$1 WHERE id=$2`, [total, order.id]);
-    order.total_xaf = total;
-
-    res.json({ order });
+    res.json({
+      success: true,
+      order_id: order.id,
+      order: {
+        id: order.id,
+        total_xaf: Number(order.total),
+        status: order.status,
+        fulfillment_type: order.fulfillment_type,
+        created_at: order.created_at,
+      },
+    });
   } catch (err) {
-    console.error("Error en POST /orders:", err);
-    res.status(500).json({ error: "Error creando pedido" });
+    console.error("Error creando pedido:", err);
+    res.status(500).json({ error: "No se pudo crear el pedido" });
   }
 });
-
 
 // ================= ADMIN =================
 app.get("/api/admin/users", authMiddleware, requireRole("admin"), async (req, res) => {
